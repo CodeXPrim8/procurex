@@ -17,9 +17,12 @@ interface ChatMessage {
 }
 
 interface ChatSession {
-  id: number
+  id: number | string
   title?: string
   messages: ChatMessage[]
+  legacy_id?: number | null
+  created_at?: string
+  updated_at?: string
 }
 
 interface AppState {

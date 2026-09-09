@@ -41,6 +41,16 @@ import { getAccessToken } from '@/lib/sessionToken'
 import { naturalChatTitle } from '@/lib/chatTitle'
 import { formatPriceRange, getCurrencySymbol } from '@/lib/currency'
 import { useVoiceChat } from '@/lib/useVoiceChat'
+import {
+  cloudChatsReady,
+  createCloudSession,
+  getCloudSession,
+  importApiSessionToCloud,
+  isCloudSessionId,
+  listCloudSessions,
+  saveCloudMessage,
+  subscribeCloudChats,
+} from '@/lib/cloudChats'
 
 const LAST_CHAT_KEY = 'procurex_last_chat_id'
 
@@ -72,8 +82,12 @@ function makeLocalSession() {
   }
 }
 
-function rememberChat(id: number | undefined) {
-  if (!id || typeof window === 'undefined') return
+function sameChatId(a: unknown, b: unknown) {
+  return a != null && b != null && String(a) === String(b)
+}
+
+function rememberChat(id: number | string | undefined) {
+  if (id == null || id === '' || typeof window === 'undefined') return
   try {
     localStorage.setItem(LAST_CHAT_KEY, String(id))
   } catch {
@@ -81,28 +95,31 @@ function rememberChat(id: number | undefined) {
   }
 }
 
-function readLastChatId(): number | null {
+function readLastChatId(): string | number | null {
   if (typeof window === 'undefined') return null
   try {
     const raw = localStorage.getItem(LAST_CHAT_KEY)
-    const parsed = raw ? Number(raw) : NaN
-    return Number.isFinite(parsed) ? parsed : null
+    if (!raw) return null
+    if (isCloudSessionId(raw)) return raw
+    const parsed = Number(raw)
+    return Number.isFinite(parsed) ? parsed : raw
   } catch {
     return null
   }
 }
 
 function mergeSessionLists(serverList: any[], localList: any[]) {
-  const byId = new Map<number, any>()
+  const byId = new Map<string, any>()
   for (const item of serverList) {
     if (item?.id == null) continue
-    byId.set(item.id, { ...item, messages: item.messages || [] })
+    byId.set(String(item.id), { ...item, messages: item.messages || [] })
   }
   for (const item of localList) {
     if (item?.id == null) continue
-    const existing = byId.get(item.id)
+    const key = String(item.id)
+    const existing = byId.get(key)
     if (!existing) {
-      byId.set(item.id, item)
+      byId.set(key, item)
       continue
     }
     const existingTitle = (existing.title || '').trim()
@@ -111,7 +128,7 @@ function mergeSessionLists(serverList: any[], localList: any[]) {
       localTitle &&
       localTitle.toLowerCase() !== 'new chat' &&
       (!existingTitle || existingTitle.toLowerCase() === 'new chat')
-    byId.set(item.id, {
+    byId.set(key, {
       ...existing,
       ...item,
       title: preferLocal ? localTitle : existingTitle || localTitle,
@@ -140,6 +157,7 @@ export default function ChatPage() {
   const [searchQuery, setSearchQuery] = useState('')
   const [showSearchModal, setShowSearchModal] = useState(false)
   const [showComposerMenu, setShowComposerMenu] = useState(false)
+  const [accountSyncReady, setAccountSyncReady] = useState<boolean | null>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const wsRef = useRef<WebSocket | null>(null)
   const wsSessionIdRef = useRef<number | null>(null)
@@ -158,6 +176,9 @@ export default function ChatPage() {
   currentSessionRef.current = currentSession
   const handleSendRef = useRef<(preset?: string) => Promise<void>>(async () => {})
   const sendLockRef = useRef(false)
+  const isLoadingRef = useRef(false)
+  const liveAssistantRef = useRef('')
+  isLoadingRef.current = isLoading
 
   const voice = useVoiceChat({
     busy: isLoading,
@@ -250,6 +271,30 @@ export default function ChatPage() {
   const isServerSession = (id: unknown): id is number =>
     typeof id === 'number' && id > 0 && id < 1_000_000_000
 
+  const accountWsId = (session: any): number | null => {
+    if (!session) return null
+    if (isServerSession(session.id)) return session.id
+    if (isServerSession(session.legacy_id)) return session.legacy_id
+    return null
+  }
+
+  const matchesWsSession = (session: any, wsId: number) =>
+    Boolean(session && (sameChatId(session.id, wsId) || sameChatId(session.legacy_id, wsId)))
+
+  const persistAccountMessage = async (
+    session: any,
+    role: 'user' | 'assistant' | 'system',
+    content: string,
+    title?: string
+  ) => {
+    if (!isAuthenticated || !isCloudSessionId(session?.id) || !content) return
+    try {
+      await saveCloudMessage(session.id, role, content, title)
+    } catch (error) {
+      console.error('Failed to sync chat:', error)
+    }
+  }
+
   const sessionLabel = (session: any) =>
     session?.title?.trim() || `Chat ${session?.id ?? ''}`
 
@@ -316,18 +361,64 @@ export default function ChatPage() {
     const initAuthed = async () => {
       setSessionsLoading(true)
       try {
+        const cloudReady = await cloudChatsReady()
+        if (!cancelled) setAccountSyncReady(cloudReady)
+        if (cancelled) return
+
+        if (cloudReady) {
+          try {
+            const apiList = await chatAPI.getSessions()
+            const existing = await listCloudSessions()
+            const haveLegacy = new Set(
+              existing.map((item) => item.legacy_id).filter((id): id is number => typeof id === 'number')
+            )
+            for (const item of Array.isArray(apiList) ? apiList : []) {
+              if (haveLegacy.has(item.id)) continue
+              try {
+                const full = await chatAPI.getSession(item.id)
+                await importApiSessionToCloud({
+                  ...full,
+                  messages: (full.messages || []).map((message: any) => ({
+                    role: message.role,
+                    content: message.content,
+                  })),
+                })
+              } catch {
+                await importApiSessionToCloud(item)
+              }
+            }
+          } catch {
+            // Phone and Vercel often cannot reach the laptop API. Account chats still load.
+          }
+          if (cancelled) return
+          let list = await listCloudSessions()
+          if (list.length === 0) {
+            list = [await createCloudSession('New chat')]
+          }
+          const lastId = readLastChatId()
+          const preferred =
+            list.find((item) => sameChatId(item.id, lastId)) ||
+            list.find((item) => sameChatId(item.id, currentSessionRef.current?.id)) ||
+            list[0]
+          const full = (await getCloudSession(preferred.id)) || preferred
+          if (cancelled) return
+          setSessions(list)
+          setCurrentSession({ ...full, messages: full.messages || [] } as any)
+          rememberChat(full.id)
+          return
+        }
+
         const data = await chatAPI.getSessions()
         if (cancelled) return
         const list = Array.isArray(data) ? data : []
-        setSessions((prev) => mergeSessionLists(list, prev))
+        setSessions((prev) => mergeSessionLists(list, prev.filter((item) => isServerSession(item.id))))
         const current = currentSessionRef.current
-        const currentIsServer = current && isServerSession(current.id)
-        if (currentIsServer) {
+        if (current && isServerSession(current.id)) {
           rememberChat(current.id)
           if (!current.messages || current.messages.length === 0) {
             try {
               const full = await chatAPI.getSession(current.id)
-              if (!cancelled && currentSessionRef.current?.id === current.id) {
+              if (!cancelled && sameChatId(currentSessionRef.current?.id, current.id)) {
                 setCurrentSession({ ...full, messages: full.messages || [] })
               }
             } catch {
@@ -337,7 +428,7 @@ export default function ChatPage() {
         } else {
           const lastId = readLastChatId()
           const preferred =
-            list.find((item: any) => item.id === lastId) || list[0]
+            list.find((item: any) => sameChatId(item.id, lastId)) || list[0]
           if (preferred) {
             try {
               const full = await chatAPI.getSession(preferred.id)
@@ -352,31 +443,30 @@ export default function ChatPage() {
               }
             }
           } else {
-            try {
-              const session = await chatAPI.createSession('New chat')
-              if (!cancelled) {
-                const next = { ...session, messages: [], title: session.title || 'New chat' }
-                setCurrentSession(next)
-                setSessions((prev) => mergeSessionLists([next], prev))
-                rememberChat(session.id)
-              }
-            } catch {
-              const tempSession = makeLocalSession()
-              if (!cancelled) {
-                setCurrentSession(tempSession as any)
-                setSessions((prev) => mergeSessionLists([tempSession], prev))
-                rememberChat(tempSession.id)
-              }
+            const session = await chatAPI.createSession('New chat')
+            if (!cancelled) {
+              const next = { ...session, messages: [], title: session.title || 'New chat' }
+              setCurrentSession(next)
+              setSessions((prev) => mergeSessionLists([next], prev))
+              rememberChat(session.id)
             }
           }
         }
       } catch (error) {
         console.error('Failed to load chats:', error)
+        if (!cancelled) setAccountSyncReady(false)
         if (!cancelled && !currentSessionRef.current) {
-          const tempSession = makeLocalSession()
-          setCurrentSession(tempSession as any)
-          setSessions((prev) => mergeSessionLists([tempSession], prev))
-          rememberChat(tempSession.id)
+          try {
+            const created = await createCloudSession('New chat')
+            setCurrentSession(created as any)
+            setSessions([created])
+            rememberChat(created.id)
+          } catch {
+            const tempSession = makeLocalSession()
+            setCurrentSession(tempSession as any)
+            setSessions([tempSession])
+            rememberChat(tempSession.id)
+          }
         }
       } finally {
         if (!cancelled) setSessionsLoading(false)
@@ -393,6 +483,43 @@ export default function ChatPage() {
       cancelled = true
     }
   }, [authReady, isAuthenticated, user?.role, setCurrentSession])
+
+  useEffect(() => {
+    if (!isAuthenticated || !user?.id) return
+    let cancelled = false
+    let unsub: (() => void) | undefined
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const reload = () => {
+      if (timer) clearTimeout(timer)
+      timer = setTimeout(async () => {
+        if (cancelled || isLoadingRef.current) return
+        try {
+          if (!(await cloudChatsReady())) return
+          const list = await listCloudSessions()
+          if (cancelled) return
+          setSessions(list)
+          const current = currentSessionRef.current
+          if (current && isCloudSessionId(current.id)) {
+            const full = await getCloudSession(current.id)
+            if (!cancelled && full && !isLoadingRef.current) {
+              setCurrentSession(full as any)
+            }
+          }
+        } catch (error) {
+          console.error('Failed to refresh synced chats:', error)
+        }
+      }, 400)
+    }
+    void (async () => {
+      if (!(await cloudChatsReady()) || cancelled) return
+      unsub = subscribeCloudChats(user.id, reload)
+    })()
+    return () => {
+      cancelled = true
+      if (timer) clearTimeout(timer)
+      unsub?.()
+    }
+  }, [isAuthenticated, user?.id, setCurrentSession])
 
   useEffect(() => {
     // Wait for auth to be ready before attempting connection
@@ -416,8 +543,8 @@ export default function ChatPage() {
       return
     }
 
-    const sessionId = currentSession.id
-    if (!isServerSession(sessionId)) {
+    const sessionId = accountWsId(currentSession)
+    if (!sessionId) {
       if (wsRef.current) {
         try {
           wsRef.current.close(1000, 'Temporary session')
@@ -456,7 +583,7 @@ export default function ChatPage() {
         const connected = await connectWebSocket(sessionId, 0, false)
         if (!connected) {
           setTimeout(() => {
-            if (currentSessionRef.current?.id === sessionId && isAuthenticated) {
+            if (matchesWsSession(currentSessionRef.current, sessionId) && isAuthenticated) {
               connectWebSocket(sessionId, 0, true)
             }
           }, 2000)
@@ -466,7 +593,7 @@ export default function ChatPage() {
         setWsConnected(false)
         setIsReconnecting(false)
         setTimeout(() => {
-          if (currentSessionRef.current?.id === sessionId && isAuthenticated) {
+          if (matchesWsSession(currentSessionRef.current, sessionId) && isAuthenticated) {
             connectWebSocket(sessionId, 0, true)
           }
         }, 3000)
@@ -490,11 +617,10 @@ export default function ChatPage() {
 
   // Reconnect WebSocket when page becomes visible (handles tab switching and refresh)
   useEffect(() => {
-    const sessionId = currentSession?.id
+    const sessionId = accountWsId(currentSession)
     const handleVisibilityChange = () => {
       if (document.visibilityState === 'visible') {
-        // Page became visible, check if we need to reconnect
-        if (isAuthenticated && isServerSession(sessionId)) {
+        if (isAuthenticated && sessionId) {
           if (
             !wsRef.current ||
             wsRef.current.readyState !== WebSocket.OPEN ||
@@ -506,9 +632,8 @@ export default function ChatPage() {
       }
     }
 
-    // Also handle page focus
     const handleFocus = () => {
-      if (isAuthenticated && isServerSession(sessionId)) {
+      if (isAuthenticated && sessionId) {
         if (
           !wsRef.current ||
           wsRef.current.readyState !== WebSocket.OPEN ||
@@ -534,7 +659,7 @@ export default function ChatPage() {
 
     const blankInSidebar =
       isBlankChat(currentSession) &&
-      sessions.some((item) => item.id === currentSession?.id)
+      sessions.some((item) => sameChatId(item.id, currentSession?.id))
     if (blankInSidebar) {
       setProductResults([])
       return
@@ -562,16 +687,31 @@ export default function ChatPage() {
     }
 
     try {
-      const session = await chatAPI.createSession('New chat')
-      const next = {
-        ...session,
-        messages: [],
-        title: session.title || 'New chat',
-        updated_at: session.updated_at || new Date().toISOString(),
+      let legacyId: number | null = null
+      try {
+        const apiSession = await chatAPI.createSession('New chat')
+        legacyId = apiSession.id
+      } catch {
+        // Account chats still sync even if the laptop API is offline.
       }
-      setCurrentSession(next)
-      setSessions((prev) => [next, ...prev.filter((item) => item.id !== session.id)])
-      rememberChat(session.id)
+      if (await cloudChatsReady()) {
+        const cloud = await createCloudSession('New chat', legacyId)
+        setCurrentSession({ ...cloud, messages: [], legacy_id: legacyId } as any)
+        setSessions((prev) => [cloud, ...prev.filter((item) => !sameChatId(item.id, cloud.id))])
+        rememberChat(cloud.id)
+        setProductResults([])
+        return
+      }
+      if (!legacyId) throw new Error('Could not create chat')
+      const next = {
+        id: legacyId,
+        messages: [],
+        title: 'New chat',
+        updated_at: new Date().toISOString(),
+      }
+      setCurrentSession(next as any)
+      setSessions((prev) => [next, ...prev.filter((item) => !sameChatId(item.id, legacyId))])
+      rememberChat(legacyId)
       setProductResults([])
     } catch (error: any) {
       if (error.response?.status === 401) {
@@ -579,26 +719,60 @@ export default function ChatPage() {
         router.push('/login?redirect=/chat')
       } else {
         console.error('Failed to create session:', error)
-        const tempSession = makeLocalSession()
-        setCurrentSession(tempSession as any)
-        setSessions((prev) => [tempSession, ...prev])
-        rememberChat(tempSession.id)
-        setProductResults([])
+        try {
+          const cloud = await createCloudSession('New chat')
+          setCurrentSession(cloud as any)
+          setSessions((prev) => [cloud, ...prev.filter((item) => !sameChatId(item.id, cloud.id))])
+          rememberChat(cloud.id)
+          setProductResults([])
+        } catch {
+          const tempSession = makeLocalSession()
+          setCurrentSession(tempSession as any)
+          setSessions((prev) => [tempSession, ...prev])
+          rememberChat(tempSession.id)
+          setProductResults([])
+        }
       }
     }
   }
 
-  const selectSession = async (sessionId: number) => {
+  const selectSession = async (sessionId: number | string) => {
     setShowSidebar(false)
     rememberChat(sessionId)
+    const cached = sessions.find((item) => sameChatId(item.id, sessionId))
+    if (isAuthenticated && isCloudSessionId(sessionId)) {
+      try {
+        const session = await getCloudSession(sessionId)
+        if (session) {
+          setCurrentSession(session as any)
+          setSessions((prev) =>
+            prev.map((item) =>
+              sameChatId(item.id, session.id)
+                ? { ...item, title: session.title || item.title, messages: session.messages }
+                : item
+            )
+          )
+          setProductResults([])
+          return
+        }
+      } catch (error) {
+        console.error('Failed to load synced chat:', error)
+      }
+      if (cached) {
+        setCurrentSession({ ...cached, messages: cached.messages || [] })
+      }
+      return
+    }
     if (!isAuthenticated || !isServerSession(sessionId)) {
       const localSessions = localStorage.getItem('temp_chat_sessions')
       if (localSessions) {
         const list = JSON.parse(localSessions)
-        const session = list.find((item: any) => item.id === sessionId)
+        const session = list.find((item: any) => sameChatId(item.id, sessionId))
         if (session) {
           setCurrentSession(session)
         }
+      } else if (cached) {
+        setCurrentSession({ ...cached, messages: cached.messages || [] })
       }
       return
     }
@@ -608,7 +782,9 @@ export default function ChatPage() {
       setCurrentSession({ ...session, messages: session.messages || [] })
       setSessions((prev) =>
         prev.map((item) =>
-          item.id === session.id ? { ...item, title: session.title || item.title } : item
+          item.id === session.id || sameChatId(item.id, session.id)
+            ? { ...item, title: session.title || item.title }
+            : item
         )
       )
       setProductResults([])
@@ -706,13 +882,13 @@ export default function ChatPage() {
       }
 
     ws.onmessage = (event) => {
-        if (wsRef.current !== ws || currentSessionRef.current?.id !== sessionId) return
+        if (wsRef.current !== ws || !matchesWsSession(currentSessionRef.current, sessionId)) return
         try {
       const data = JSON.parse(event.data)
       
       if (data.type === 'typing') {
-        // Show typing indicator immediately for instant feedback
         if (data.status) {
+          liveAssistantRef.current = ''
           setMessages((prev) => {
             const updated = [...prev]
             const lastMsg = updated[updated.length - 1]
@@ -724,6 +900,11 @@ export default function ChatPage() {
           })
         }
       } else if (data.type === 'chunk') {
+        if (!liveAssistantRef.current || liveAssistantRef.current === '...') {
+          liveAssistantRef.current = data.content
+        } else {
+          liveAssistantRef.current += data.content
+        }
         setMessages((prev) => {
           const updated = [...prev]
           const lastMsg = updated[updated.length - 1]
@@ -743,10 +924,10 @@ export default function ChatPage() {
         if (data.title && wsSessionIdRef.current) {
           const sid = wsSessionIdRef.current
           setSessions((prev) =>
-            prev.map((item) => (item.id === sid ? { ...item, title: data.title } : item))
+            prev.map((item) => (matchesWsSession(item, sid) ? { ...item, title: data.title } : item))
           )
           const current = currentSessionRef.current
-          if (current && current.id === sid) {
+          if (current && matchesWsSession(current, sid)) {
             setCurrentSession({
               ...current,
               title: data.title,
@@ -762,10 +943,10 @@ export default function ChatPage() {
         if (data.title && wsSessionIdRef.current) {
           const sid = wsSessionIdRef.current
           setSessions((prev) =>
-            prev.map((item) => (item.id === sid ? { ...item, title: data.title } : item))
+            prev.map((item) => (matchesWsSession(item, sid) ? { ...item, title: data.title } : item))
           )
           const current = currentSessionRef.current
-          if (current && current.id === sid) {
+          if (current && matchesWsSession(current, sid)) {
             setCurrentSession({
               ...current,
               title: data.title,
@@ -774,6 +955,15 @@ export default function ChatPage() {
           }
         }
         const sid = wsSessionIdRef.current
+        const current = currentSessionRef.current
+        if (current && isCloudSessionId(current.id) && liveAssistantRef.current && liveAssistantRef.current !== '...') {
+          void persistAccountMessage(
+            current,
+            'assistant',
+            liveAssistantRef.current,
+            data.title || current.title
+          )
+        }
         if (sid && isServerSession(sid) && !data.title) {
           chatAPI
             .getSession(sid)
@@ -781,13 +971,13 @@ export default function ChatPage() {
               if (!full) return
               setSessions((prev) =>
                 prev.map((item) =>
-                  item.id === full.id
+                  matchesWsSession(item, full.id)
                     ? { ...item, title: full.title || item.title, updated_at: full.updated_at }
                     : item
                 )
               )
               const current = currentSessionRef.current
-              if (current && current.id === full.id && full.title) {
+              if (current && matchesWsSession(current, full.id) && full.title) {
                 setCurrentSession({
                   ...current,
                   title: full.title,
@@ -895,14 +1085,14 @@ export default function ChatPage() {
               if (backendHealthy) {
                 console.log('Retrying chat connection in 5 seconds...')
                 setTimeout(() => {
-                  if (currentSession?.id && typeof currentSession.id === 'number') {
-                    connectWebSocket(currentSession.id, 0, true)
+                  if (accountWsId(currentSession)) {
+                    connectWebSocket(accountWsId(currentSession) as number, 0, true)
                   }
                 }, 5000)
               } else {
                 setTimeout(() => {
-                  if (currentSession?.id && typeof currentSession.id === 'number') {
-                    connectWebSocket(currentSession.id, 0, true)
+                  if (accountWsId(currentSession)) {
+                    connectWebSocket(accountWsId(currentSession) as number, 0, true)
                   }
                 }, 15000)
               }
@@ -910,16 +1100,16 @@ export default function ChatPage() {
               if (backgroundRetryRef.current >= 8) return
               backgroundRetryRef.current += 1
               setTimeout(() => {
-                if (currentSession?.id && typeof currentSession.id === 'number') {
-                  connectWebSocket(currentSession.id, 0, true)
+                if (accountWsId(currentSession)) {
+                  connectWebSocket(accountWsId(currentSession) as number, 0, true)
                 }
               }, 5000)
             })
           } else {
             console.log(`Connection closed: ${reason}. Retrying in background.`)
             setTimeout(() => {
-              if (currentSession?.id && typeof currentSession.id === 'number') {
-                connectWebSocket(currentSession.id, 0, true)
+              if (accountWsId(currentSession)) {
+                connectWebSocket(accountWsId(currentSession) as number, 0, true)
               }
             }, 5000)
           }
@@ -949,17 +1139,39 @@ export default function ChatPage() {
         session = tempSession as any
       } else {
         try {
-          const created = await chatAPI.createSession('New chat')
-          const next = {
-            ...created,
-            messages: [],
-            title: created.title || 'New chat',
-            updated_at: created.updated_at || new Date().toISOString(),
+          let legacyId: number | null = null
+          try {
+            const created = await chatAPI.createSession('New chat')
+            legacyId = created.id
+          } catch (error: any) {
+            if (error.response?.status === 401) {
+              showToast('Please login to send messages', 'warning')
+              sendLockRef.current = false
+              router.push('/login?redirect=/chat')
+              return
+            }
           }
-          setCurrentSession(next)
-          setSessions((prev) => [next, ...prev.filter((item) => item.id !== created.id)])
-          rememberChat(created.id)
-          session = next
+          if (await cloudChatsReady()) {
+            const cloud = await createCloudSession('New chat', legacyId)
+            const next = { ...cloud, messages: [], legacy_id: legacyId }
+            setCurrentSession(next as any)
+            setSessions((prev) => [next, ...prev.filter((item) => !sameChatId(item.id, cloud.id))])
+            rememberChat(cloud.id)
+            session = next as any
+          } else if (legacyId) {
+            const next = {
+              id: legacyId,
+              messages: [],
+              title: 'New chat',
+              updated_at: new Date().toISOString(),
+            }
+            setCurrentSession(next as any)
+            setSessions((prev) => [next, ...prev.filter((item) => !sameChatId(item.id, legacyId))])
+            rememberChat(legacyId)
+            session = next as any
+          } else {
+            throw new Error('Could not create chat')
+          }
         } catch (error: any) {
           if (error.response?.status === 401) {
             showToast('Please login to send messages', 'warning')
@@ -991,8 +1203,8 @@ export default function ChatPage() {
     const nextTitle = generated || session.title || 'New chat'
     setSessions((prev) => {
       const now = new Date().toISOString()
-      const rest = prev.filter((item) => item.id !== session.id)
-      const current = prev.find((item) => item.id === session.id)
+      const rest = prev.filter((item) => !sameChatId(item.id, session.id))
+      const current = prev.find((item) => sameChatId(item.id, session.id))
       return [
         {
           ...(current || session),
@@ -1000,13 +1212,15 @@ export default function ChatPage() {
           title: nextTitle || current?.title || session.title || 'New chat',
           updated_at: now,
           messages: current?.messages || session.messages || [],
+          legacy_id: session.legacy_id ?? current?.legacy_id,
         },
         ...rest,
       ]
     })
+    void persistAccountMessage(session, 'user', userMessage, nextTitle)
 
-    // For guests or when the API is unreachable, keep the chat working locally.
-      if (!isAuthenticated || !isServerSession(session.id)) {
+    // For guests, keep the chat working locally.
+      if (!isAuthenticated) {
         // Save message to local storage
         const updatedMessages = [...(session?.messages || []), userMsg]
         const updatedSession = {
@@ -1064,8 +1278,8 @@ export default function ChatPage() {
 
     // Authenticated users: Try WebSocket first, fallback to REST API
     try {
-      // Try to ensure WebSocket is connected
-      const connected = await connectWebSocket(session.id)
+      const wsId = accountWsId(session)
+      const connected = wsId ? await connectWebSocket(wsId) : false
       
       if (connected && wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
         // Wait a bit for WebSocket to be fully ready
@@ -1079,7 +1293,7 @@ export default function ChatPage() {
       
       // Save message via REST API
       try {
-        await chatAPI.createMessage(session.id, userMessage)
+        if (wsId) await chatAPI.createMessage(wsId, userMessage)
       } catch (e) {
         console.error('Failed to save message:', e)
       }
@@ -1162,10 +1376,13 @@ export default function ChatPage() {
         }
 
         setIsLoading(false)
-        try {
-          await chatAPI.createMessage(session.id, assistantResponse, 'assistant')
-        } catch (error) {
-          console.error('Failed to save assistant message:', error)
+        void persistAccountMessage(session, 'assistant', assistantResponse, nextTitle)
+        if (wsId) {
+          try {
+            await chatAPI.createMessage(wsId, assistantResponse, 'assistant')
+          } catch (error) {
+            console.error('Failed to save assistant message:', error)
+          }
         }
       } catch (apiError: any) {
         console.error('API error:', apiError)
@@ -1225,10 +1442,13 @@ export default function ChatPage() {
         }
 
         setIsLoading(false)
-        try {
-          await chatAPI.createMessage(session.id, assistantResponse, 'assistant')
-        } catch (error) {
-          console.error('Failed to save assistant message:', error)
+        void persistAccountMessage(session, 'assistant', assistantResponse, nextTitle)
+        if (wsId) {
+          try {
+            await chatAPI.createMessage(wsId, assistantResponse, 'assistant')
+          } catch (error) {
+            console.error('Failed to save assistant message:', error)
+          }
         }
       }
     } catch (error: any) {
@@ -1463,6 +1683,23 @@ export default function ChatPage() {
               </div>
             </div>
             <p className="text-xs text-[#b4b4b4] px-3 py-2 uppercase tracking-wider">Recent Chats</p>
+            {isAuthenticated && accountSyncReady === false && (
+              <button
+                type="button"
+                onClick={async () => {
+                  try {
+                    const sql = await fetch('/chat-sync.sql').then((res) => res.text())
+                    await navigator.clipboard.writeText(sql)
+                    showToast('SQL copied. Paste it in Supabase SQL editor, click Run, then refresh.', 'success')
+                  } catch {
+                    showToast('Could not copy the setup SQL.', 'error')
+                  }
+                }}
+                className="mx-3 mb-2 text-left text-[11px] leading-snug text-[#8e8e8e] hover:text-[#ececec]"
+              >
+                Copy setup SQL so this account’s chats match on phone and laptop.
+              </button>
+            )}
             {(() => {
               const filteredSessions = searchQuery
                 ? sessions.filter((session) =>
@@ -1490,7 +1727,7 @@ export default function ChatPage() {
                     setSearchQuery('')
                   }}
                   className={`w-full text-left px-3 py-2.5 rounded-lg hover:bg-[#2f2f2f] transition-colors mb-1 group ${
-                    currentSession?.id === session.id ? 'bg-[#2f2f2f]' : ''
+                    currentSession?.id === session.id || sameChatId(currentSession?.id, session.id) ? 'bg-[#2f2f2f]' : ''
                   }`}
                 >
                   <p className="text-sm text-[#ececec] truncate flex items-center">

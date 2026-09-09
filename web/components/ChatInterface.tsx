@@ -36,7 +36,7 @@ export default function ChatInterface() {
  useEffect(() => {
  // Load session messages
  const loadMessages = async () => {
- if (currentSession?.id) {
+ if (currentSession?.id && typeof currentSession.id === 'number') {
  try {
  const session = await chatAPI.getSession(currentSession.id)
  setMessages(session.messages || [])
@@ -117,6 +117,10 @@ export default function ChatInterface() {
 
  try {
  // Save user message to backend
+ if (typeof currentSession.id !== 'number') {
+ setIsLoading(false)
+ return
+ }
  await chatAPI.createMessage(currentSession.id, userMessage)
 
  // Connect WebSocket if not connected
