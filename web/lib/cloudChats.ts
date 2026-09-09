@@ -31,18 +31,39 @@ function isMissingTable(error: any) {
 }
 
 async function currentUserId() {
-  const { data, error } = await supabase.auth.getUser()
-  if (error || !data.user?.id) return null
-  return data.user.id
+  try {
+    const { data, error } = await withTimeout(supabase.auth.getUser(), 6000)
+    if (error || !data.user?.id) return null
+    return data.user.id
+  } catch {
+    return null
+  }
+}
+
+async function withTimeout<T>(promise: PromiseLike<T>, ms: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    return await Promise.race([
+      Promise.resolve(promise),
+      new Promise<T>((_, reject) => {
+        timer = setTimeout(() => reject(new Error('timeout')), ms)
+      }),
+    ])
+  } finally {
+    if (timer) clearTimeout(timer)
+  }
 }
 
 export async function cloudChatsReady() {
   if (!isSupabaseConfigured) return false
-  const { error } = await supabase.from(SESSION_TABLE).select('id').limit(1)
-  if (!error) return true
-  if (isMissingTable(error)) return false
-  // Table exists but RLS blocked an empty select without a user; still usable after login.
-  return error.code !== 'PGRST116'
+  try {
+    const { error } = await withTimeout(supabase.from(SESSION_TABLE).select('id').limit(1), 6000)
+    if (!error) return true
+    if (isMissingTable(error)) return false
+    return error.code !== 'PGRST116'
+  } catch {
+    return false
+  }
 }
 
 function mapSessionRow(row: any, messages: CloudMessage[] = []): CloudSession {
@@ -59,11 +80,14 @@ function mapSessionRow(row: any, messages: CloudMessage[] = []): CloudSession {
 export async function listCloudSessions(): Promise<CloudSession[]> {
   const userId = await currentUserId()
   if (!userId) return []
-  const { data, error } = await supabase
-    .from(SESSION_TABLE)
-    .select('id, title, created_at, updated_at, legacy_id')
-    .eq('user_id', userId)
-    .order('updated_at', { ascending: false })
+  const { data, error } = await withTimeout(
+    supabase
+      .from(SESSION_TABLE)
+      .select('id, title, created_at, updated_at, legacy_id')
+      .eq('user_id', userId)
+      .order('updated_at', { ascending: false }),
+    8000
+  )
   if (error) throw error
   return (data || []).map((row) => mapSessionRow(row))
 }

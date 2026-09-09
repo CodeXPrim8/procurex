@@ -178,6 +178,7 @@ export default function ChatPage() {
   const sendLockRef = useRef(false)
   const isLoadingRef = useRef(false)
   const liveAssistantRef = useRef('')
+  const chatLoadGenRef = useRef(0)
   isLoadingRef.current = isLoading
 
   const voice = useVoiceChat({
@@ -359,39 +360,17 @@ export default function ChatPage() {
     }
 
     const initAuthed = async () => {
+      const gen = ++chatLoadGenRef.current
       setSessionsLoading(true)
+      const stillActive = () => !cancelled && chatLoadGenRef.current === gen
       try {
         const cloudReady = await cloudChatsReady()
-        if (!cancelled) setAccountSyncReady(cloudReady)
-        if (cancelled) return
+        if (!stillActive()) return
+        setAccountSyncReady(cloudReady)
 
         if (cloudReady) {
-          try {
-            const apiList = await chatAPI.getSessions()
-            const existing = await listCloudSessions()
-            const haveLegacy = new Set(
-              existing.map((item) => item.legacy_id).filter((id): id is number => typeof id === 'number')
-            )
-            for (const item of Array.isArray(apiList) ? apiList : []) {
-              if (haveLegacy.has(item.id)) continue
-              try {
-                const full = await chatAPI.getSession(item.id)
-                await importApiSessionToCloud({
-                  ...full,
-                  messages: (full.messages || []).map((message: any) => ({
-                    role: message.role,
-                    content: message.content,
-                  })),
-                })
-              } catch {
-                await importApiSessionToCloud(item)
-              }
-            }
-          } catch {
-            // Phone and Vercel often cannot reach the laptop API. Account chats still load.
-          }
-          if (cancelled) return
           let list = await listCloudSessions()
+          if (!stillActive()) return
           if (list.length === 0) {
             list = [await createCloudSession('New chat')]
           }
@@ -400,11 +379,50 @@ export default function ChatPage() {
             list.find((item) => sameChatId(item.id, lastId)) ||
             list.find((item) => sameChatId(item.id, currentSessionRef.current?.id)) ||
             list[0]
-          const full = (await getCloudSession(preferred.id)) || preferred
-          if (cancelled) return
+          if (!stillActive()) return
           setSessions(list)
-          setCurrentSession({ ...full, messages: full.messages || [] } as any)
-          rememberChat(full.id)
+          setCurrentSession({ ...preferred, messages: preferred.messages || [] } as any)
+          rememberChat(preferred.id)
+          setSessionsLoading(false)
+
+          void getCloudSession(preferred.id).then((full) => {
+            if (!stillActive() || !full) return
+            if (sameChatId(currentSessionRef.current?.id, full.id)) {
+              setCurrentSession(full as any)
+            }
+          })
+
+          void (async () => {
+            try {
+              const apiList = await chatAPI.getSessions()
+              const existing = await listCloudSessions()
+              const haveLegacy = new Set(
+                existing.map((item) => item.legacy_id).filter((id): id is number => typeof id === 'number')
+              )
+              for (const item of Array.isArray(apiList) ? apiList : []) {
+                if (!stillActive()) return
+                if (haveLegacy.has(item.id)) continue
+                try {
+                  const full = await chatAPI.getSession(item.id)
+                  await importApiSessionToCloud({
+                    ...full,
+                    messages: (full.messages || []).map((message: any) => ({
+                      role: message.role,
+                      content: message.content,
+                    })),
+                  })
+                } catch {
+                  await importApiSessionToCloud(item)
+                }
+                haveLegacy.add(item.id)
+              }
+              if (!stillActive()) return
+              const refreshed = await listCloudSessions()
+              setSessions(refreshed)
+            } catch {
+              // Phone and Vercel often cannot reach the laptop API. Account chats still load.
+            }
+          })()
           return
         }
 
@@ -454,8 +472,8 @@ export default function ChatPage() {
         }
       } catch (error) {
         console.error('Failed to load chats:', error)
-        if (!cancelled) setAccountSyncReady(false)
-        if (!cancelled && !currentSessionRef.current) {
+        if (stillActive()) setAccountSyncReady(false)
+        if (stillActive() && !currentSessionRef.current) {
           try {
             const created = await createCloudSession('New chat')
             setCurrentSession(created as any)
@@ -469,7 +487,7 @@ export default function ChatPage() {
           }
         }
       } finally {
-        if (!cancelled) setSessionsLoading(false)
+        if (chatLoadGenRef.current === gen) setSessionsLoading(false)
       }
     }
 
@@ -1707,7 +1725,7 @@ export default function ChatPage() {
                   )
                 : sessions
 
-              if (!authReady || sessionsLoading) {
+              if ((!authReady || sessionsLoading) && sessions.length === 0) {
                 return <p className="text-xs text-[#8e8e8e] px-3 py-2">Loading chats...</p>
               }
 
@@ -1851,7 +1869,7 @@ export default function ChatPage() {
                       sessionLabel(session).toLowerCase().includes(searchQuery.toLowerCase())
                     )
                   : sessions
-                if (!authReady || sessionsLoading) {
+                if ((!authReady || sessionsLoading) && sessions.length === 0) {
                   return <p className="text-sm text-[#8e8e8e] px-3 py-4 text-center">Loading chats...</p>
                 }
                 if (matches.length === 0) {
