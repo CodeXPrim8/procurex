@@ -231,7 +231,7 @@ export default function ChatPage() {
     }
   }, [isAuthenticated, wsConnected, backendAvailable])
 
-  const isServerSession = (id: unknown) =>
+  const isServerSession = (id: unknown): id is number =>
     typeof id === 'number' && id > 0 && id < 1_000_000_000
 
   const sessionLabel = (session: any) =>
@@ -459,16 +459,17 @@ export default function ChatPage() {
 
   // Reconnect WebSocket when page becomes visible (handles tab switching and refresh)
   useEffect(() => {
+    const sessionId = currentSession?.id
     const handleVisibilityChange = () => {
       if (document.visibilityState === 'visible') {
         // Page became visible, check if we need to reconnect
-        if (isAuthenticated && isServerSession(currentSession?.id)) {
+        if (isAuthenticated && isServerSession(sessionId)) {
           if (
             !wsRef.current ||
             wsRef.current.readyState !== WebSocket.OPEN ||
-            wsSessionIdRef.current !== currentSession.id
+            wsSessionIdRef.current !== sessionId
           ) {
-            connectWebSocket(currentSession.id, 0, true)
+            connectWebSocket(sessionId, 0, true)
           }
         }
       }
@@ -476,13 +477,13 @@ export default function ChatPage() {
 
     // Also handle page focus
     const handleFocus = () => {
-      if (isAuthenticated && isServerSession(currentSession?.id)) {
+      if (isAuthenticated && isServerSession(sessionId)) {
         if (
           !wsRef.current ||
           wsRef.current.readyState !== WebSocket.OPEN ||
-          wsSessionIdRef.current !== currentSession.id
+          wsSessionIdRef.current !== sessionId
         ) {
-          connectWebSocket(currentSession.id, 0, true)
+          connectWebSocket(sessionId, 0, true)
         }
       }
     }
@@ -716,7 +717,7 @@ export default function ChatPage() {
             prev.map((item) => (item.id === sid ? { ...item, title: data.title } : item))
           )
           const current = currentSessionRef.current
-          if (current?.id === sid) {
+          if (current && current.id === sid) {
             setCurrentSession({
               ...current,
               title: data.title,
@@ -735,7 +736,7 @@ export default function ChatPage() {
             prev.map((item) => (item.id === sid ? { ...item, title: data.title } : item))
           )
           const current = currentSessionRef.current
-          if (current?.id === sid) {
+          if (current && current.id === sid) {
             setCurrentSession({
               ...current,
               title: data.title,
@@ -757,7 +758,7 @@ export default function ChatPage() {
                 )
               )
               const current = currentSessionRef.current
-              if (current?.id === full.id && full.title) {
+              if (current && current.id === full.id && full.title) {
                 setCurrentSession({
                   ...current,
                   title: full.title,
