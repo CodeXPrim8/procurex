@@ -68,6 +68,7 @@ class Settings(BaseSettings):
         "http://localhost:8081",
         "http://127.0.0.1:3000",  # Alternative localhost format
         "http://127.0.0.1:8081",
+        "https://procurex-woad.vercel.app",
         # Network access origins will be added here by setup script
         # Example: "http://192.168.1.100:3000"
     ]

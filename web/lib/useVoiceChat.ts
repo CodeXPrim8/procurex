@@ -21,6 +21,7 @@ export function useVoiceChat({ onFinalTranscript, onInterim, onError, busy }: Vo
   const listeningRef = useRef(false)
   const busyRef = useRef(Boolean(busy))
   const speakReplyRef = useRef(false)
+  const mutedRef = useRef(false)
   const lastSpokenRef = useRef('')
   const onFinalRef = useRef(onFinalTranscript)
   const onInterimRef = useRef(onInterim)
@@ -86,7 +87,7 @@ export function useVoiceChat({ onFinalTranscript, onInterim, onError, busy }: Vo
       const live = (finalText || interim).trim()
       if (live) onInterimRef.current?.(live)
       if (finalText.trim()) {
-        speakReplyRef.current = true
+        speakReplyRef.current = false
         stopListening()
         onFinalRef.current(finalText.trim())
       }
@@ -121,9 +122,11 @@ export function useVoiceChat({ onFinalTranscript, onInterim, onError, busy }: Vo
 
   const toggleListening = useCallback(() => {
     if (listeningRef.current) {
+      mutedRef.current = true
       stopListening()
       return
     }
+    mutedRef.current = false
     startListening()
   }, [startListening, stopListening])
 
@@ -134,25 +137,26 @@ export function useVoiceChat({ onFinalTranscript, onInterim, onError, busy }: Vo
     }
     setVoiceMode(true)
     voiceModeRef.current = true
-    speakReplyRef.current = true
+    speakReplyRef.current = false
+    mutedRef.current = false
     startListening()
   }, [startListening, stopVoice])
 
+  useEffect(() => {
+    if (!voiceMode || busy || listening || speaking || mutedRef.current) return
+    const timer = window.setTimeout(() => {
+      if (voiceModeRef.current && !busyRef.current && !listeningRef.current && !mutedRef.current) {
+        startListening()
+      }
+    }, 450)
+    return () => window.clearTimeout(timer)
+  }, [voiceMode, busy, listening, speaking, startListening])
+
   const speakReply = useCallback(
-    (content: string) => {
-      if (!content || content === lastSpokenRef.current) return
-      if (!speakReplyRef.current && !voiceModeRef.current) return
-      lastSpokenRef.current = content
-      setSpeaking(true)
-      stopListening()
-      speakText(content, () => {
-        setSpeaking(false)
-        if (voiceModeRef.current && !busyRef.current) {
-          startListening()
-        }
-      })
+    (_content: string) => {
+      // Keep replies on screen. Users can tap Listen on a message if they want audio.
     },
-    [startListening, stopListening]
+    []
   )
 
   const speakNow = useCallback((content: string) => {

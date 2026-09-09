@@ -41,6 +41,7 @@ logger.info(f"CORS Origins configured: {cors_origins}")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=cors_origins,
+    allow_origin_regex=r"https://.*\.vercel\.app",
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH", "HEAD"],  # Include HEAD
     allow_headers=["*"],  # Allow all headers including Authorization, Content-Type
