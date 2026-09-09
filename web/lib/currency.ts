@@ -46,7 +46,7 @@ export async function detectUserLocation(): Promise<string> {
       }
       userLocation = data.country_code || 'US'
       locationDetected = true
-      return userLocation
+      return userLocation || 'US'
     } catch (e) {
       // Fallback: Default to NG if detection fails (for Nigerian users)
       userLocation = 'NG'

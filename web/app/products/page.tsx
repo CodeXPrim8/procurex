@@ -207,13 +207,11 @@ export default function ProductsPage() {
  description: createProductForm.description.trim() || null,
  specifications: specifications,
  image_url: createProductForm.image_url.trim() || null,
+ stock_quantity: createProductForm.stock_quantity,
+ price: Math.round(createProductForm.price * 100),
  }
 
- await vendorsAPI.createProduct(
- productData,
- createProductForm.stock_quantity,
- Math.round(createProductForm.price * 100)
- )
+ await vendorsAPI.createProduct(productData)
  showToast('Product uploaded successfully! It will now be searchable by ProcureX AI.', 'success')
  setShowAddProduct(false)
  setCreateProductForm({
