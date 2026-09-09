@@ -21,6 +21,9 @@ import {
   Mic,
   MicOff,
   AudioLines,
+  Pencil,
+  MoreHorizontal,
+  ArrowUp,
   Menu,
   X,
 } from 'lucide-react'
@@ -126,11 +129,13 @@ export default function ChatPage() {
   const [backendAvailable, setBackendAvailable] = useState<boolean | null>(null)
   const [searchQuery, setSearchQuery] = useState('')
   const [showSearchModal, setShowSearchModal] = useState(false)
+  const [showComposerMenu, setShowComposerMenu] = useState(false)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const wsRef = useRef<WebSocket | null>(null)
   const wsSessionIdRef = useRef<number | null>(null)
   const userMenuRef = useRef<HTMLDivElement>(null)
   const userMenuHeaderRef = useRef<HTMLDivElement>(null)
+  const userMenuMobileRef = useRef<HTMLDivElement>(null)
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null)
   const reconnectAttemptsRef = useRef(0)
   const backgroundRetryRef = useRef(0)
@@ -1197,7 +1202,9 @@ export default function ChatPage() {
       if (userMenuRef.current && !userMenuRef.current.contains(event.target as Node)) {
         setShowUserMenu(false)
       }
-      if (userMenuHeaderRef.current && !userMenuHeaderRef.current.contains(event.target as Node)) {
+      const inHeader = userMenuHeaderRef.current?.contains(event.target as Node)
+      const inMobile = userMenuMobileRef.current?.contains(event.target as Node)
+      if (!inHeader && !inMobile) {
         setShowUserMenuHeader(false)
       }
     }
@@ -1257,7 +1264,7 @@ export default function ChatPage() {
       )}
 
       {/* Sidebar - Navigation & Chat History (ChatGPT style) */}
-      <div className={`flex flex-col h-full bg-[#171717] border-r border-[#2f2f2f] overflow-hidden z-50 w-72 max-w-[85vw] fixed inset-y-0 left-0 md:relative md:max-w-none md:w-64 md:flex-shrink-0 transition-transform duration-300 ${showSidebar ? 'translate-x-0' : '-translate-x-full max-md:pointer-events-none'} md:translate-x-0`}>
+      <div className={`flex flex-col h-full bg-black md:bg-[#171717] border-r border-[#2f2f2f] overflow-hidden z-50 w-72 max-w-[85vw] fixed inset-y-0 left-0 md:relative md:max-w-none md:w-64 md:flex-shrink-0 transition-transform duration-300 ${showSidebar ? 'translate-x-0' : '-translate-x-full max-md:pointer-events-none'} md:translate-x-0`}>
         <div className="md:hidden flex items-center justify-between p-3 border-b border-[#2f2f2f]">
           <span className="font-semibold text-[#ececec]">Menu</span>
           <button
@@ -1430,7 +1437,7 @@ export default function ChatPage() {
         </div>
 
         {/* User Info / Login Prompt */}
-        <div className="absolute bottom-0 left-0 right-0 p-3 border-t border-[#2f2f2f] bg-[#171717]">
+        <div className="absolute bottom-0 left-0 right-0 p-3 border-t border-[#2f2f2f] bg-black md:bg-[#171717]">
           {isAuthenticated ? (
             <div className="relative" ref={userMenuRef}>
               <button
@@ -1584,34 +1591,79 @@ export default function ChatPage() {
       )}
 
       {/* Main Chat Area - ChatGPT Style */}
-      <div className="flex-1 flex flex-col bg-[#212121] min-w-0 min-h-0 h-full w-full">
-        {/* Top Header */}
-        <div className="bg-[#171717] border-b border-[#2f2f2f] px-2 sm:px-4 py-2 sm:py-3 flex items-center justify-between gap-2 shrink-0">
-          <div className="flex items-center min-w-0 space-x-1 sm:space-x-2 text-[#ececec]">
-            <button
-              type="button"
-              onClick={() => setShowSidebar(true)}
-              className="md:hidden min-h-11 min-w-11 inline-flex items-center justify-center rounded-lg hover:bg-[#2f2f2f]"
-              aria-label="Open menu"
-            >
-              <Menu className="w-5 h-5" />
-            </button>
-            <Package className="w-5 h-5 text-primary-600 flex-shrink-0" />
-            <span className="font-semibold truncate">ProcureX</span>
-            <span className="text-[#8e8e8e] text-sm hidden sm:inline">v1</span>
-          </div>
-          <div className="flex items-center space-x-1 sm:space-x-3">
+      <div className="flex-1 flex flex-col bg-black md:bg-[#212121] min-w-0 min-h-0 h-full w-full">
+        {/* Mobile header */}
+        <div className="md:hidden flex items-center justify-between px-3 py-2 shrink-0">
+          <button
+            type="button"
+            onClick={() => setShowSidebar(true)}
+            className="h-10 w-10 inline-flex items-center justify-center rounded-full bg-[#2a2a2a] text-white"
+            aria-label="Open menu"
+          >
+            <Menu className="w-5 h-5" />
+          </button>
+          <div className="flex items-center gap-2">
             <button
               type="button"
               onClick={() => void createNewSession()}
-              className="md:hidden min-h-11 min-w-11 inline-flex items-center justify-center rounded-lg text-[#ececec] hover:bg-[#2f2f2f]"
+              className="h-10 w-10 inline-flex items-center justify-center rounded-full bg-[#2a2a2a] text-white"
               aria-label="New chat"
             >
-              <Plus className="w-5 h-5" />
+              <Pencil className="w-5 h-5" />
             </button>
+            <div className="relative" ref={userMenuMobileRef}>
+              <button
+                type="button"
+                onClick={() => {
+                  if (isAuthenticated) setShowUserMenuHeader(!showUserMenuHeader)
+                  else router.push('/login')
+                }}
+                className="h-10 w-10 inline-flex items-center justify-center rounded-full bg-[#2a2a2a] text-white"
+                aria-label="More"
+              >
+                <MoreHorizontal className="w-5 h-5" />
+              </button>
+              {isAuthenticated && showUserMenuHeader && (
+                <div className="absolute right-0 top-full mt-2 w-48 bg-[#2f2f2f] border border-[#2f2f2f] rounded-2xl shadow-lg overflow-hidden z-50">
+                  <div className="px-4 py-3 border-b border-[#3d3d3d]">
+                    <p className="text-sm font-medium text-[#ececec] truncate">{user?.full_name || user?.email}</p>
+                    <p className="text-xs text-[#b4b4b4] mt-1 truncate">{user?.email}</p>
+                  </div>
+                  <Link
+                    href="/profile"
+                    onClick={() => setShowUserMenuHeader(false)}
+                    className="flex items-center space-x-2 px-4 py-3 text-sm text-[#ececec] hover:bg-[#3d3d3d]"
+                  >
+                    <User className="w-4 h-4" />
+                    <span>Profile</span>
+                  </Link>
+                  <button
+                    onClick={() => {
+                      handleLogout()
+                      setShowUserMenuHeader(false)
+                    }}
+                    className="w-full flex items-center space-x-2 px-4 py-3 text-sm text-red-400 hover:bg-[#3d3d3d] text-left"
+                  >
+                    <LogOut className="w-4 h-4" />
+                    <span>Logout</span>
+                  </button>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+
+        {/* Desktop header */}
+        <div className="hidden md:flex bg-[#171717] border-b border-[#2f2f2f] px-4 py-3 items-center justify-between gap-2 shrink-0">
+          <div className="flex items-center min-w-0 space-x-2 text-[#ececec]">
+            <Package className="w-5 h-5 text-primary-600 flex-shrink-0" />
+            <span className="font-semibold truncate">ProcureX</span>
+            <span className="text-[#8e8e8e] text-sm">v1</span>
+          </div>
+          <div className="flex items-center space-x-3">
             <Link
               href="/upgrade"
-              className="hidden md:inline-flex items-center text-xs uppercase tracking-wide border border-primary-500 text-primary-600 px-3 py-1.5 rounded-full hover:bg-primary-600/10 transition"
+              className="inline-flex items-center text-xs uppercase tracking-wide border border-primary-500 text-primary-600 px-3 py-1.5 rounded-full hover:bg-primary-600/10 transition"
             >
               Upgrade to Pro
             </Link>
@@ -1664,14 +1716,23 @@ export default function ChatPage() {
           </div>
         </div>
 
+        {voice.voiceMode && (
+          <div className="md:hidden flex-1 flex items-center justify-center min-h-0">
+            <div className={`gpt-orb ${voice.listening || voice.speaking ? 'gpt-orb-listening' : ''}`} />
+          </div>
+        )}
+
         {/* Messages - ChatGPT Style */}
-        <div className="flex-1 overflow-y-auto overscroll-contain min-h-0">
+        <div className={`${voice.voiceMode ? 'hidden md:flex' : 'flex'} flex-1 overflow-y-auto overscroll-contain min-h-0 flex-col`}>
           {currentSession?.messages.length === 0 && (
             <div className="flex items-center justify-center min-h-full py-8">
               <div className="text-center max-w-2xl px-4">
-                <h1 className="text-3xl sm:text-4xl font-semibold text-white mb-3 sm:mb-4">ProcureX</h1>
-                <p className="text-[#b4b4b4] text-base sm:text-lg mb-6 sm:mb-8">Ask me about IT products, prices, and availability!</p>
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <h1 className="text-[28px] md:text-4xl font-medium md:font-semibold text-white mb-3 md:mb-4">
+                  <span className="md:hidden">What&apos;s on the agenda today?</span>
+                  <span className="hidden md:inline">ProcureX</span>
+                </h1>
+                <p className="hidden md:block text-[#b4b4b4] text-lg mb-8">Ask me about IT products, prices, and availability!</p>
+                <div className="hidden md:grid grid-cols-1 sm:grid-cols-2 gap-3">
                   {[
                     "What laptops do you have?",
                     "Show me available phones",
@@ -1691,15 +1752,15 @@ export default function ChatPage() {
             </div>
           )}
           
-          <div className="max-w-3xl mx-auto">
+          <div className="max-w-3xl mx-auto w-full">
             {currentSession?.messages.map((message, index) => (
               <ChatMessage key={index} message={message} onSpeak={voice.speakNow} />
             ))}
             
             {isLoading && (
-              <div className="px-4 py-8 bg-transparent">
+              <div className="px-4 py-6 md:py-8 bg-transparent">
                 <div className="flex items-center space-x-3 max-w-3xl mx-auto">
-                  <div className="w-8 h-8 rounded-full bg-primary-600 flex items-center justify-center flex-shrink-0">
+                  <div className="hidden md:flex w-8 h-8 rounded-full bg-primary-600 items-center justify-center flex-shrink-0">
                     <MessageSquare className="w-5 h-5 text-white" />
                   </div>
                   <div className="flex space-x-1">
@@ -1728,19 +1789,74 @@ export default function ChatPage() {
           <div ref={messagesEndRef} />
         </div>
 
-        {/* Input - ChatGPT Style */}
-        <div className="border-t border-[#2f2f2f] bg-[#212121] px-3 sm:px-4 pt-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] shrink-0">
-          <div className="max-w-3xl mx-auto">
-            <div className={`relative flex items-end bg-[#2f2f2f] rounded-2xl border shadow-lg ${
+        {/* Input */}
+        <div className="relative bg-black md:bg-[#212121] md:border-t md:border-[#2f2f2f] px-3 md:px-4 pt-2 md:pt-3 pb-[max(0.6rem,env(safe-area-inset-bottom))] shrink-0">
+          {showComposerMenu && (
+            <div className="md:hidden absolute bottom-full left-3 right-3 mb-2 bg-[#2f2f2f] rounded-2xl overflow-hidden shadow-xl z-20">
+              <Link
+                href="/products"
+                onClick={() => setShowComposerMenu(false)}
+                className="flex items-center gap-3 px-4 py-3.5 text-sm text-white hover:bg-[#3d3d3d]"
+              >
+                <ShoppingCart className="w-4 h-4" />
+                Browse products
+              </Link>
+              <Link
+                href="/quotations"
+                onClick={() => setShowComposerMenu(false)}
+                className="flex items-center gap-3 px-4 py-3.5 text-sm text-white hover:bg-[#3d3d3d]"
+              >
+                <FileText className="w-4 h-4" />
+                Quotations
+              </Link>
+            </div>
+          )}
+
+          {voice.voiceMode && (
+            <div className="md:hidden flex items-center gap-2.5">
+              <div className="flex-1 h-12 rounded-full bg-[#303030] flex items-center px-4 text-[#8e8e8e]">
+                <Plus className="w-5 h-5 text-white mr-3 flex-shrink-0" />
+                <span>Ask ProcureX</span>
+              </div>
+              <button
+                type="button"
+                onClick={voice.toggleListening}
+                disabled={isLoading}
+                className="h-12 w-12 rounded-full bg-[#303030] text-white inline-flex items-center justify-center"
+                aria-label={voice.listening ? 'Stop listening' : 'Muted'}
+              >
+                {voice.listening ? <Mic className="w-5 h-5" /> : <MicOff className="w-5 h-5" />}
+              </button>
+              <button
+                type="button"
+                onClick={voice.stopVoice}
+                className="h-12 w-12 rounded-full bg-white text-black inline-flex items-center justify-center"
+                aria-label="Close voice"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+          )}
+
+          <div className={`${voice.voiceMode ? 'hidden md:block' : 'block'} max-w-3xl mx-auto`}>
+            <div className={`relative flex items-end md:items-end bg-[#303030] md:bg-[#2f2f2f] rounded-full md:rounded-2xl border ${
               voice.listening ? 'border-[#19C37D]' : 'border-transparent'
             }`}>
+              <button
+                type="button"
+                onClick={() => setShowComposerMenu((open) => !open)}
+                className="md:hidden m-1 h-10 w-10 inline-flex items-center justify-center rounded-full text-white flex-shrink-0"
+                aria-label="Add"
+              >
+                <Plus className="w-5 h-5" />
+              </button>
               {voice.supported && (
                 <button
                   type="button"
                   onClick={voice.toggleVoiceMode}
                   disabled={isLoading}
                   title={voice.voiceMode ? 'Stop voice chat' : 'Start voice chat'}
-                  className={`m-1 sm:m-2 min-h-11 min-w-11 inline-flex items-center justify-center rounded-lg flex-shrink-0 transition-colors ${
+                  className={`hidden md:inline-flex m-2 min-h-11 min-w-11 items-center justify-center rounded-lg flex-shrink-0 transition-colors ${
                     voice.voiceMode
                       ? 'bg-[#19C37D] text-white'
                       : 'text-[#8e8e8e] hover:bg-[#3d3d3d] hover:text-[#ececec]'
@@ -1758,9 +1874,9 @@ export default function ChatPage() {
                     ? 'Listening...'
                     : voice.speaking
                       ? 'Speaking...'
-                      : 'Message ProcureX...'
+                      : 'Ask ProcureX'
                 }
-                className="flex-1 min-w-0 resize-none bg-transparent text-base text-[#ececec] placeholder-[#8e8e8e] px-2 py-3 focus:outline-none overflow-y-auto"
+                className="flex-1 min-w-0 resize-none bg-transparent text-base text-[#ececec] placeholder-[#8e8e8e] px-1 md:px-2 py-3 focus:outline-none overflow-y-auto"
                 rows={1}
                 disabled={isLoading}
                 style={{ maxHeight: '120px' }}
@@ -1771,28 +1887,54 @@ export default function ChatPage() {
                   onClick={voice.toggleListening}
                   disabled={isLoading || voice.speaking}
                   title={voice.listening ? 'Stop listening' : 'Speak'}
-                  className={`m-1 sm:m-2 min-h-11 min-w-11 inline-flex items-center justify-center rounded-lg flex-shrink-0 transition-colors ${
+                  className={`m-1 md:m-2 h-10 w-10 md:min-h-11 md:min-w-11 inline-flex items-center justify-center rounded-full md:rounded-lg flex-shrink-0 transition-colors ${
                     voice.listening
                       ? 'bg-red-600 text-white animate-pulse'
-                      : 'text-[#8e8e8e] hover:bg-[#3d3d3d] hover:text-[#ececec]'
+                      : 'text-[#cfcfcf] hover:bg-[#3d3d3d] hover:text-[#ececec]'
                   }`}
                 >
                   {voice.listening ? <MicOff className="w-5 h-5" /> : <Mic className="w-5 h-5" />}
                 </button>
               )}
-              <button
-                onClick={() => void handleSend()}
-                disabled={isLoading || !(input || '').trim()}
-                className="m-1 sm:m-2 min-h-11 min-w-11 inline-flex items-center justify-center rounded-lg bg-primary-600 hover:bg-primary-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex-shrink-0"
-              >
-                {isLoading ? (
-                  <Loader2 className="w-5 h-5 text-white animate-spin" />
-                ) : (
-                  <Send className="w-5 h-5 text-white" />
-                )}
-              </button>
+              {(input || '').trim() ? (
+                <button
+                  onClick={() => void handleSend()}
+                  disabled={isLoading}
+                  className="m-1 md:m-2 h-9 w-9 md:min-h-11 md:min-w-11 inline-flex items-center justify-center rounded-full bg-white md:bg-primary-600 text-black md:text-white hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex-shrink-0"
+                  aria-label="Send"
+                >
+                  {isLoading ? (
+                    <Loader2 className="w-5 h-5 animate-spin" />
+                  ) : (
+                    <>
+                      <ArrowUp className="w-5 h-5 md:hidden" />
+                      <Send className="w-5 h-5 hidden md:block text-white" />
+                    </>
+                  )}
+                </button>
+              ) : (
+                <>
+                  <button
+                    type="button"
+                    onClick={voice.toggleVoiceMode}
+                    disabled={isLoading || !voice.supported}
+                    className="md:hidden m-1 h-9 w-9 inline-flex items-center justify-center rounded-full bg-[#3b82f6] text-white disabled:opacity-50 flex-shrink-0"
+                    aria-label="Voice mode"
+                  >
+                    {isLoading ? <Loader2 className="w-5 h-5 animate-spin" /> : <AudioLines className="w-5 h-5" />}
+                  </button>
+                  <button
+                    type="button"
+                    disabled
+                    className="hidden md:inline-flex m-2 min-h-11 min-w-11 items-center justify-center rounded-lg bg-primary-600 text-white opacity-50 cursor-not-allowed flex-shrink-0"
+                    aria-label="Send"
+                  >
+                    <Send className="w-5 h-5" />
+                  </button>
+                </>
+              )}
             </div>
-            <p className="text-[11px] sm:text-xs text-[#8e8e8e] text-center mt-2 px-2">
+            <p className="hidden md:block text-xs text-[#8e8e8e] text-center mt-2 px-2">
               {voice.voiceMode
                 ? 'Voice chat on. Speak, then ProcureX will answer out loud.'
                 : voice.supported

@@ -72,3 +72,27 @@ select {
 .no-scrollbar::-webkit-scrollbar {
  display: none;
 }
+
+.gpt-orb {
+ width: 10.5rem;
+ height: 10.5rem;
+ border-radius: 9999px;
+ background: radial-gradient(circle at 32% 30%, #ffffff 0%, #dbeafe 22%, #93c5fd 48%, #3b82f6 78%, #1e3a8a 100%);
+ box-shadow: 0 0 70px 22px rgba(59, 130, 246, 0.35);
+ animation: gpt-orb-breathe 3.2s ease-in-out infinite;
+}
+
+.gpt-orb-listening {
+ animation-duration: 1.1s;
+ box-shadow: 0 0 90px 28px rgba(96, 165, 250, 0.5);
+}
+
+@keyframes gpt-orb-breathe {
+ 0%,
+ 100% {
+ transform: scale(1);
+ }
+ 50% {
+ transform: scale(1.06);
+ }
+}
