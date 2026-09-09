@@ -13,7 +13,9 @@ export async function diagnoseSupabase() {
 
   // Check 1: Environment variables
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL
-  const key = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
+  const key =
+    process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY ||
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
   
   diagnostics.checks.envVars = {
     url: {
