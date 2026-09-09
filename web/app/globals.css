@@ -1,0 +1,53 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+ --foreground-rgb: 236, 236, 236;
+ --background-rgb: 33, 33, 33;
+}
+
+body {
+ color: rgb(var(--foreground-rgb));
+ background: #212121;
+}
+
+/* ChatGPT-style scrollbar */
+::-webkit-scrollbar {
+ width: 10px;
+ height: 10px;
+}
+
+::-webkit-scrollbar-track {
+ background: #171717;
+}
+
+::-webkit-scrollbar-thumb {
+ background: #2f2f2f;
+ border-radius: 5px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+ background: #3d3d3d;
+}
+
+/* Toast animation */
+@keyframes slide-in {
+ from {
+ transform: translateX(100%);
+ opacity: 0;
+ }
+ to {
+ transform: translateX(0);
+ opacity: 1;
+ }
+}
+
+.animate-slide-in {
+ animation: slide-in 0.3s ease-out;
+}
+
+/* Smooth scrolling */
+html {
+ scroll-behavior: smooth;
+}

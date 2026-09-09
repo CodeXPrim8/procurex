@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Supabase Connection Test</title>
+    <style>
+        body { font-family: Arial, sans-serif; padding: 20px; max-width: 800px; margin: 0 auto; }
+        .test { margin: 20px 0; padding: 15px; border: 1px solid #ddd; border-radius: 5px; }
+        .success { background: #d4edda; border-color: #c3e6cb; }
+        .error { background: #f8d7da; border-color: #f5c6cb; }
+        .info { background: #d1ecf1; border-color: #bee5eb; }
+        pre { background: #f4f4f4; padding: 10px; border-radius: 3px; overflow-x: auto; }
+    </style>
+</head>
+<body>
+    <h1>Supabase Connection Diagnostic Tool</h1>
+    <div id="results"></div>
+    <button onclick="runTests()" style="padding: 10px 20px; font-size: 16px; cursor: pointer;">Run Tests</button>
+
+    <script>
+        async function runTests() {
+            const results = document.getElementById('results');
+            results.innerHTML = '<div class="test info">Running tests...</div>';
+
+            const url = 'https://eugnepzbjrvqmzldhrql.supabase.co';
+            const anonKey = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImV1Z25lcHpianJ2cW16bGRocnFsIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjMxMzQzMzMsImV4cCI6MjA3ODcxMDMzM30.Zf1uB2FeDXJieiRrMcBq2gGLEKwlv0ZLfh7CG_58bfU';
+
+            let html = '';
+
+            // Test 1: Basic connectivity
+            html += '<div class="test"><h3>Test 1: Basic Connectivity</h3>';
+            try {
+                const response = await fetch(`${url}/rest/v1/`, {
+                    method: 'HEAD',
+                    headers: { 'apikey': anonKey }
+                });
+                if (response.ok) {
+                    html += '<p class="success">✅ Can reach Supabase server</p>';
+                } else {
+                    html += `<p class="error">❌ Server returned status: ${response.status} ${response.statusText}</p>`;
+                }
+            } catch (error) {
+                html += `<p class="error">❌ Cannot connect: ${error.message}</p>`;
+                html += `<pre>${error.stack}</pre>`;
+            }
+            html += '</div>';
+
+            // Test 2: Auth endpoint
+            html += '<div class="test"><h3>Test 2: Auth Endpoint</h3>';
+            try {
+                const response = await fetch(`${url}/auth/v1/health`, {
+                    headers: { 'apikey': anonKey }
+                });
+                if (response.ok) {
+                    html += '<p class="success">✅ Auth endpoint is accessible</p>';
+                } else {
+                    html += `<p class="error">❌ Auth endpoint returned: ${response.status}</p>`;
+                }
+            } catch (error) {
+                html += `<p class="error">❌ Auth endpoint error: ${error.message}</p>`;
+            }
+            html += '</div>';
+
+            // Test 3: DNS Resolution
+            html += '<div class="test"><h3>Test 3: DNS Resolution</h3>';
+            try {
+                const testUrl = new URL(url);
+                html += `<p class="info">Testing DNS for: ${testUrl.hostname}</p>`;
+                // Try to fetch with a simple request
+                const response = await fetch(url, { method: 'HEAD', mode: 'no-cors' });
+                html += '<p class="success">✅ DNS resolves (hostname is reachable)</p>';
+            } catch (error) {
+                html += `<p class="error">❌ DNS resolution failed: ${error.message}</p>`;
+            }
+            html += '</div>';
+
+            // Test 4: API Key validation
+            html += '<div class="test"><h3>Test 4: API Key Format</h3>';
+            if (anonKey && anonKey.startsWith('eyJ')) {
+                html += '<p class="success">✅ API key format looks valid (JWT format)</p>';
+            } else {
+                html += '<p class="error">❌ API key format invalid (should start with "eyJ")</p>';
+            }
+            html += '</div>';
+
+            results.innerHTML = html;
+        }
+
+        // Auto-run on load
+        window.onload = () => {
+            setTimeout(runTests, 500);
+        };
+    </script>
+</body>
+</html>
