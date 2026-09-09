@@ -83,77 +83,84 @@ export function useAuth() {
 
   useEffect(() => {
     let mounted = true
+    const applySessionUser = async (session: { access_token?: string; user?: SupabaseUser | null } | null) => {
+      if (session?.access_token) {
+        rememberAccessToken(session.access_token)
+      }
+      const mapped = mapSupabaseUser(session?.user ?? null)
+      if (!mapped) return
+      const metadata = session?.user?.user_metadata || {}
+      if (metadata.role !== 'vendor' && hasVendorAccountMarkers(metadata)) {
+        const restored = await persistVendorProfile({
+          company_name: metadata.company_name,
+          business_registration_number: metadata.business_registration_number,
+          domain: metadata.domain,
+          phone: metadata.phone,
+          address: metadata.address,
+        })
+        if (!mounted) return
+        setUser(restored || mapped)
+        return
+      }
+      const synced = await syncVendorRole(mapped)
+      if (!mounted) return
+      setUser(synced)
+    }
+
     const init = async () => {
       try {
-        console.log('🔍 Initializing auth...')
         const { data, error } = await supabase.auth.getSession()
         if (!mounted) return
         if (error) {
           console.warn('getSession warning:', error.message)
         }
         let session = data?.session
-        if (!session?.access_token) {
-          const { data: userData } = await supabase.auth.getUser()
-          if (userData?.user) {
-            const refreshed = await supabase.auth.getSession()
-            session = refreshed.data.session ?? session
-          }
+        if (!session?.access_token && session?.refresh_token) {
+          const { data: refreshed } = await supabase.auth.refreshSession()
+          session = refreshed.session ?? session
         }
-        if (!session?.access_token) {
-          try {
-            const refreshed = await supabase.auth.refreshSession()
-            session = refreshed.data.session ?? session
-          } catch (refreshError) {
-            console.warn('Could not refresh session:', refreshError)
-          }
+        if (session?.user) {
+          await applySessionUser(session)
         }
-        if (session?.access_token) {
-          rememberAccessToken(session.access_token)
-        }
-        console.log('✅ Auth initialized successfully', session ? '(user logged in)' : '(no session)')
-        const mapped = mapSupabaseUser(session?.user ?? null)
-        const metadata = session?.user?.user_metadata || {}
-        if (mapped && metadata.role !== 'vendor' && hasVendorAccountMarkers(metadata)) {
-          const restored = await persistVendorProfile({
-            company_name: metadata.company_name,
-            business_registration_number: metadata.business_registration_number,
-            domain: metadata.domain,
-            phone: metadata.phone,
-            address: metadata.address,
-          })
-          if (!mounted) return
-          setUser(restored || mapped)
-        } else {
-          const synced = await syncVendorRole(mapped)
-          if (!mounted) return
-          setUser(synced)
-        }
-        setAuthReady(true)
+        if (mounted) setAuthReady(true)
       } catch (error: any) {
-        console.error('❌ Failed to initialize auth:', error)
-        console.error('Error details:', {
-          message: error?.message,
-          stack: error?.stack
-        })
-        setAuthReady(true)
+        console.error('Failed to initialize auth:', error)
+        if (mounted) setAuthReady(true)
       }
     }
-    init()
+    void init()
 
     const { data: listener } = supabase.auth.onAuthStateChange((event, session) => {
       if (session?.access_token) {
         rememberAccessToken(session.access_token)
-      } else if (event === 'SIGNED_OUT') {
-        rememberAccessToken(null)
       }
-      if (mounted) {
-        setUser(mapSupabaseUser(session?.user ?? null))
+      if (!mounted) return
+      if (event === 'SIGNED_OUT') {
+        rememberAccessToken(null)
+        setUser(null)
+        return
+      }
+      if (session?.user) {
+        setUser(mapSupabaseUser(session.user))
       }
     })
+
+    const onVisible = () => {
+      if (document.visibilityState !== 'visible') return
+      void supabase.auth.startAutoRefresh()
+      void supabase.auth.getSession().then(({ data }) => {
+        if (data.session?.user && mounted) {
+          rememberAccessToken(data.session.access_token)
+          setUser(mapSupabaseUser(data.session.user))
+        }
+      })
+    }
+    document.addEventListener('visibilitychange', onVisible)
 
     return () => {
       mounted = false
       listener?.subscription?.unsubscribe()
+      document.removeEventListener('visibilitychange', onVisible)
     }
   }, [setUser, setAuthReady])
 

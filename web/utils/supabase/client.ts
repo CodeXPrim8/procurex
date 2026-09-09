@@ -14,7 +14,13 @@ export function createClient() {
     return createBrowserClient(supabaseUrl, supabaseKey)
   }
   if (!globalForSupabase.procurexBrowserSupabase) {
-    globalForSupabase.procurexBrowserSupabase = createBrowserClient(supabaseUrl, supabaseKey)
+    globalForSupabase.procurexBrowserSupabase = createBrowserClient(supabaseUrl, supabaseKey, {
+      auth: {
+        persistSession: true,
+        autoRefreshToken: true,
+        detectSessionInUrl: true,
+      },
+    })
   }
   return globalForSupabase.procurexBrowserSupabase
 }
