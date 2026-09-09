@@ -5,7 +5,7 @@ import { useRouter } from 'next/navigation'
 import Link from 'next/link'
 import { authAPI } from '@/lib/api'
 import { useStore } from '@/lib/store'
-import { mapSupabaseUser } from '@/lib/auth'
+import { hasVendorAccountMarkers, mapSupabaseUser, persistVendorProfile, syncVendorRole } from '@/lib/auth'
 import { showToast } from '@/lib/toast'
 import Button from '@/components/ui/Button'
 import Input from '@/components/ui/Input'
@@ -27,6 +27,24 @@ export default function LoginPage() {
  }
  }, [])
 
+ const goHome = (isVendor: boolean) => {
+ const redirect = sessionStorage.getItem('redirect_after_login')
+ if (redirect) {
+ sessionStorage.removeItem('redirect_after_login')
+ if (redirect.startsWith('/vendor') && !isVendor) {
+ router.push('/chat')
+ return
+ }
+ if (redirect.startsWith('/chat') && isVendor) {
+ router.push('/vendor')
+ return
+ }
+ router.push(redirect)
+ return
+ }
+ router.push(isVendor ? '/vendor' : '/chat')
+ }
+
  const handleLogin = async (e: React.FormEvent) => {
  e.preventDefault()
  setIsLoading(true)
@@ -34,56 +52,72 @@ export default function LoginPage() {
  try {
  await authAPI.login(email, password)
  const supabaseUser = await authAPI.getMe()
- const user = mapSupabaseUser(supabaseUser)
+ const metadata = supabaseUser?.user_metadata || {}
+ let user = mapSupabaseUser(supabaseUser)
  setUser(user)
- 
- // Check for pending vendor registration
- const pendingVendorData = localStorage.getItem('pending_vendor_registration')
- if (pendingVendorData && user?.role === 'vendor') {
+
+ const pendingRaw = localStorage.getItem('pending_vendor_registration')
+ let pending: any = null
+ if (pendingRaw) {
  try {
- const vendorData = JSON.parse(pendingVendorData)
+ pending = JSON.parse(pendingRaw)
+ } catch {
+ localStorage.removeItem('pending_vendor_registration')
+ }
+ }
+ const pendingForThisUser = Boolean(
+ pending &&
+ (!pending.email || pending.email.toLowerCase() === (user?.email || '').toLowerCase())
+ )
+
+ if (pendingForThisUser) {
+ try {
  const { vendorsAPI } = await import('@/lib/api')
  await vendorsAPI.register({
- company_name: vendorData.company_name,
- business_registration_number: vendorData.business_registration_number,
- domain: vendorData.domain,
- phone: vendorData.phone,
- address: vendorData.address,
+ company_name: pending.company_name,
+ business_registration_number: pending.business_registration_number,
+ domain: pending.domain,
+ phone: pending.phone,
+ address: pending.address,
  })
+ const vendorUser = await persistVendorProfile(pending)
+ if (vendorUser) setUser(vendorUser)
  localStorage.removeItem('pending_vendor_registration')
- showToast('Vendor account completed successfully!', 'success')
+ showToast('Welcome back — opening your vendor dashboard.', 'success')
  router.push('/vendor')
  return
  } catch (vendorError: any) {
  console.error('Error completing vendor registration:', vendorError)
- // If vendor already exists, just clear the pending data
- if (vendorError?.response?.data?.detail?.includes('already has a vendor account')) {
  localStorage.removeItem('pending_vendor_registration')
- showToast('Vendor account already exists. Redirecting to vendor dashboard.', 'info')
- router.push('/vendor')
- return
  }
- // Otherwise, show error but still allow login
- showToast('Login successful, but vendor registration failed. You can complete it on the vendor page.', 'warning')
+ } else if (pendingRaw) {
+ localStorage.removeItem('pending_vendor_registration')
+ }
+
+ const isVendor = hasVendorAccountMarkers(metadata)
+ if (isVendor && metadata.role !== 'vendor') {
+ const vendorUser = await persistVendorProfile({
+ company_name: metadata.company_name,
+ business_registration_number: metadata.business_registration_number,
+ domain: metadata.domain,
+ phone: metadata.phone,
+ address: metadata.address,
+ })
+ if (vendorUser) {
+ setUser(vendorUser)
+ user = vendorUser
+ }
+ } else if (!isVendor) {
+ const synced = await syncVendorRole(user)
+ if (synced) {
+ setUser(synced)
+ user = synced
  }
  }
- 
- showToast('Login successful!', 'success')
- 
- // Check for redirect URL first
- const redirect = sessionStorage.getItem('redirect_after_login')
- if (redirect) {
- sessionStorage.removeItem('redirect_after_login')
- router.push(redirect)
- return
- }
- 
- // Redirect based on user role
- if (user?.role === 'vendor') {
- router.push('/vendor')
- } else {
- router.push('/chat')
- }
+
+ const vendorAccount = (user?.role === 'vendor') || hasVendorAccountMarkers(metadata)
+ showToast(vendorAccount ? 'Welcome back — opening your vendor dashboard.' : 'Login successful!', 'success')
+ goHome(Boolean(vendorAccount))
  } catch (err: any) {
  console.error('Login error:', err)
  let message = 'Login failed'
@@ -144,7 +178,6 @@ export default function LoginPage() {
  value={password}
  onChange={(e) => setPassword(e.target.value)}
  autoComplete="current-password"
- className="text-[#ececec]"
  />
  </div>
 
@@ -156,4 +189,3 @@ export default function LoginPage() {
  </div>
  )
 }
-

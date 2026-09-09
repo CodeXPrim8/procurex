@@ -5,7 +5,7 @@ import { useRouter, useSearchParams } from 'next/navigation'
 import Link from 'next/link'
 import { authAPI, vendorsAPI } from '@/lib/api'
 import { useStore } from '@/lib/store'
-import { mapSupabaseUser } from '@/lib/auth'
+import { mapSupabaseUser, persistVendorProfile } from '@/lib/auth'
 import { showToast } from '@/lib/toast'
 import Button from '@/components/ui/Button'
 import Input from '@/components/ui/Input'
@@ -101,7 +101,16 @@ export default function RegisterPage() {
  formData.email,
  formData.password,
  formData.fullName || undefined,
- formData.role
+ formData.role,
+ formData.role === 'vendor'
+ ? {
+ company_name: formData.companyName,
+ business_registration_number: formData.businessRegistrationNumber || undefined,
+ domain: formData.domain || undefined,
+ phone: formData.phone || undefined,
+ address: formData.address || undefined,
+ }
+ : undefined
  )
 
  console.log('Registration response:', registration)
@@ -178,7 +187,15 @@ export default function RegisterPage() {
  phone: formData.phone || undefined,
  address: formData.address || undefined,
  })
- showToast('Vendor account created successfully!', 'success')
+ const vendorUser = await persistVendorProfile({
+ company_name: formData.companyName,
+ business_registration_number: formData.businessRegistrationNumber || undefined,
+ domain: formData.domain || undefined,
+ phone: formData.phone || undefined,
+ address: formData.address || undefined,
+ })
+ if (vendorUser) setUser(vendorUser)
+ showToast('Vendor account created. Opening your dashboard.', 'success')
  router.push('/vendor')
  return
  } catch (vendorError: any) {

@@ -3,7 +3,7 @@
 import { useState } from 'react'
 import Link from 'next/link'
 import { usePathname, useRouter } from 'next/navigation'
-import { Menu, X, User, LogOut, ShoppingCart, MessageSquare, FileText, Package, Star } from 'lucide-react'
+import { Menu, X, User, LogOut, MessageSquare, FileText, Package, Star } from 'lucide-react'
 import { useStore } from '@/lib/store'
 import SpeedTest from './SpeedTest'
 
@@ -19,23 +19,23 @@ export default function Navbar() {
  router.push('/login')
  }
 
- const navLinks = [
+ const navLinks = user?.role === 'vendor'
+ ? [
+ { href: '/vendor', label: 'Dashboard', icon: Package },
+ { href: '/quotations', label: 'Quotations', icon: FileText },
+ ]
+ : [
  { href: '/chat', label: 'Chat', icon: MessageSquare },
- { href: '/products', label: 'Products', icon: ShoppingCart },
  { href: '/quotations', label: 'Quotations', icon: FileText },
  { href: '/upgrade', label: 'Plans', icon: Star },
  ]
-
- if (user?.role === 'vendor') {
- navLinks.push({ href: '/vendor', label: 'Vendor', icon: Package })
- }
 
  return (
  <nav className="bg-[#171717] border-[#2f2f2f] border-b sticky top-0 z-40">
  <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
  <div className="flex justify-between items-center h-16">
  {/* Logo */}
- <Link href="/" className="flex items-center space-x-2">
+ <Link href={user?.role === 'vendor' ? '/vendor' : '/chat'} className="flex items-center space-x-2">
  <Package className="w-8 h-8 text-[#19C37D]" />
  <span className="text-xl font-bold text-[#ececec]">ProcureX</span>
  </Link>
@@ -77,6 +77,15 @@ export default function Navbar() {
  </button>
  {isUserMenuOpen && (
  <div className="absolute right-0 mt-2 w-48 rounded-md shadow-lg py-1 border bg-[#171717] border-[#2f2f2f]">
+ {user?.role === 'vendor' && (
+ <Link
+ href="/vendor"
+ className="block px-4 py-2 text-sm text-[#ececec] hover:bg-[#2f2f2f]"
+ onClick={() => setIsUserMenuOpen(false)}
+ >
+ Dashboard
+ </Link>
+ )}
  <Link
  href="/profile"
  className="block px-4 py-2 text-sm text-[#ececec] hover:bg-[#2f2f2f]"

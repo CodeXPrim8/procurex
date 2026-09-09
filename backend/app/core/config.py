@@ -1,6 +1,12 @@
 from pydantic_settings import BaseSettings
 from typing import Optional, List
+from pathlib import Path
+from dotenv import load_dotenv
 import json
+
+# Always load backend/.env, even if uvicorn is started from another directory.
+BACKEND_DIR = Path(__file__).resolve().parents[2]
+load_dotenv(BACKEND_DIR / ".env", override=True)
 
 
 class Settings(BaseSettings):
@@ -18,15 +24,32 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
     
     # AI Provider Configuration
-    AI_PROVIDER: str = "gemini"  # Options: "openai", "gemini", "huggingface", "fallback"
+    # smart = try Grok, ChatGPT, Kimi, Claude, then Gemini
+    AI_PROVIDER: str = "smart"
     
-    # OpenAI
+    # OpenAI / ChatGPT
     OPENAI_API_KEY: Optional[str] = None
-    OPENAI_MODEL: str = "gpt-3.5-turbo"  # Use cheaper GPT-3.5-turbo instead of GPT-4
+    OPENAI_MODEL: str = "gpt-4o"
+    
+    # xAI Grok
+    XAI_API_KEY: Optional[str] = None
+    GROK_MODEL: str = "grok-4"
+    
+    # Anthropic Claude
+    ANTHROPIC_API_KEY: Optional[str] = None
+    ANTHROPIC_MODEL: str = "claude-sonnet-4-5"
+    
+    # Moonshot Kimi
+    MOONSHOT_API_KEY: Optional[str] = None
+    MOONSHOT_MODEL: str = "moonshot-v1-auto"
+    MOONSHOT_BASE_URL: str = "https://api.moonshot.ai/v1"
+    
+    # OpenRouter (one key can serve Grok, ChatGPT, Kimi, and Claude)
+    OPENROUTER_API_KEY: Optional[str] = None
     
     # Google Gemini (Free tier available)
     GEMINI_API_KEY: Optional[str] = None
-    GEMINI_MODEL: str = "gemini-1.5-flash"  # Faster model for quick responses
+    GEMINI_MODEL: str = "gemini-3.6-flash"
     
     # Hugging Face (Free tier available)
     HUGGINGFACE_API_KEY: Optional[str] = None
@@ -75,7 +98,8 @@ class Settings(BaseSettings):
     SMTP_FROM_EMAIL: Optional[str] = None
     
     class Config:
-        env_file = ".env"
+        env_file = str(BACKEND_DIR / ".env")
+        env_file_encoding = "utf-8"
         case_sensitive = True
 
 

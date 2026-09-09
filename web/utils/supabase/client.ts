@@ -5,6 +5,16 @@ const supabaseKey =
   process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY ||
   process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
 
+const globalForSupabase = globalThis as unknown as {
+  procurexBrowserSupabase?: ReturnType<typeof createBrowserClient>
+}
+
 export function createClient() {
-  return createBrowserClient(supabaseUrl, supabaseKey)
+  if (typeof window === 'undefined') {
+    return createBrowserClient(supabaseUrl, supabaseKey)
+  }
+  if (!globalForSupabase.procurexBrowserSupabase) {
+    globalForSupabase.procurexBrowserSupabase = createBrowserClient(supabaseUrl, supabaseKey)
+  }
+  return globalForSupabase.procurexBrowserSupabase
 }

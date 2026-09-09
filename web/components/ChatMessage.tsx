@@ -1,16 +1,17 @@
 'use client'
 
 import ReactMarkdown from 'react-markdown'
-import { User, MessageSquare } from 'lucide-react'
+import { User, MessageSquare, Volume2 } from 'lucide-react'
 
 interface ChatMessageProps {
  message: {
  role: 'user' | 'assistant' | 'system'
  content: string
  }
+ onSpeak?: (content: string) => void
 }
 
-export default function ChatMessage({ message }: ChatMessageProps) {
+export default function ChatMessage({ message, onSpeak }: ChatMessageProps) {
  const isUser = message.role === 'user'
  
  return (
@@ -60,13 +61,20 @@ export default function ChatMessage({ message }: ChatMessageProps) {
  {message.content}
  </ReactMarkdown>
  </div>
+ {!isUser && onSpeak && message.content && (
+ <button
+ type="button"
+ onClick={() => onSpeak(message.content)}
+ className="mt-3 inline-flex items-center space-x-1 text-xs text-[#8e8e8e] hover:text-[#ececec]"
+ title="Listen"
+ >
+ <Volume2 className="w-3.5 h-3.5" />
+ <span>Listen</span>
+ </button>
+ )}
  </div>
  </div>
  </div>
  </div>
  )
 }
-
-
-
-

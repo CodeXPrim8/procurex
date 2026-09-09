@@ -4,7 +4,7 @@
 const USD_TO_NGN_RATE = 1500
 
 // Cache for user location
-let userLocation: string | null = null
+let userLocation: string | null = 'NG'
 let locationDetected = false
 
 /**
@@ -69,10 +69,8 @@ export async function convertPrice(usdPriceInCents: number): Promise<{ amount: n
   const location = await detectUserLocation()
   
   if (location === 'NG') {
-    const usdAmount = usdPriceInCents / 100
-    const ngnAmount = usdAmount * USD_TO_NGN_RATE
     return {
-      amount: ngnAmount,
+      amount: usdPriceInCents,
       currency: 'NGN',
       symbol: '₦'
     }
@@ -93,8 +91,7 @@ export async function formatPrice(usdPriceInCents: number, options?: { decimals?
   const decimals = options?.decimals ?? 2
   
   if (currency === 'NGN') {
-    // Format NGN with commas
-    return `${symbol}${amount.toLocaleString('en-NG', { minimumFractionDigits: decimals, maximumFractionDigits: decimals })}`
+    return `${symbol}${amount.toLocaleString('en-NG', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`
   }
   
   return `${symbol}${amount.toFixed(decimals)}`

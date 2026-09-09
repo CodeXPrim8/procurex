@@ -1,9 +1,17 @@
 import httpx
 from typing import Optional, Dict, Any
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import OperationalError
+from ..models.user import UserRole
 from ..models.vendor import Vendor, VerificationStatus
 from ..models.product import Product, VendorProduct
 from ..schemas.vendor import VendorCreate, VendorUpdate
+
+
+def _heal_vendor_schema(db: Session) -> None:
+    db.rollback()
+    from ..core.database import migrate_sqlite_schema
+    migrate_sqlite_schema()
 
 
 def verify_vendor_domain(domain: str) -> bool:
@@ -59,7 +67,65 @@ def verify_vendor(vendor: Vendor) -> Dict[str, Any]:
     return verification_results
 
 
+def ensure_vendor_for_user(
+    db: Session,
+    user,
+    supabase_user: Optional[Dict[str, Any]] = None,
+) -> Vendor:
+    """Return the user's vendor profile, creating it once from auth metadata if needed."""
+    try:
+        return _ensure_vendor_for_user(db, user, supabase_user)
+    except OperationalError as exc:
+        if "no such column" not in str(exc).lower():
+            raise
+        _heal_vendor_schema(db)
+        return _ensure_vendor_for_user(db, user, supabase_user)
+
+
+def _ensure_vendor_for_user(
+    db: Session,
+    user,
+    supabase_user: Optional[Dict[str, Any]] = None,
+) -> Vendor:
+    existing = db.query(Vendor).filter(Vendor.user_id == user.id).first()
+    if existing:
+        return existing
+
+    metadata = (supabase_user or {}).get("user_metadata") or {}
+    company_name = (
+        str(metadata.get("company_name") or "").strip()
+        or str(user.full_name or "").strip()
+        or (user.email.split("@")[0] if user.email else "My Company")
+    )
+
+    vendor = Vendor(
+        user_id=user.id,
+        company_name=company_name,
+        business_registration_number=metadata.get("business_registration_number") or None,
+        domain=metadata.get("domain") or None,
+        phone=metadata.get("phone") or None,
+        address=metadata.get("address") or None,
+        verification_status=VerificationStatus.PENDING,
+    )
+    db.add(vendor)
+    user.role = UserRole.VENDOR
+    db.commit()
+    db.refresh(vendor)
+    return vendor
+
+
 def create_vendor(db: Session, vendor_data: VendorCreate, user_id: int) -> Vendor:
+    """Create a new vendor."""
+    try:
+        return _create_vendor(db, vendor_data, user_id)
+    except OperationalError as exc:
+        if "no such column" not in str(exc).lower():
+            raise
+        _heal_vendor_schema(db)
+        return _create_vendor(db, vendor_data, user_id)
+
+
+def _create_vendor(db: Session, vendor_data: VendorCreate, user_id: int) -> Vendor:
     """Create a new vendor."""
     vendor = Vendor(
         user_id=user_id,

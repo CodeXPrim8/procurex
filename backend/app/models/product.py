@@ -15,6 +15,7 @@ class Product(Base):
     specifications = Column(JSON, nullable=True)  # Store as JSON: {"ram": "16GB", "storage": "512GB", etc.}
     base_price = Column(Integer, nullable=True)  # Price in cents
     image_url = Column(String, nullable=True)
+    image_urls = Column(JSON, nullable=True)  # Extra product photos: ["/uploads/...", ...]
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 

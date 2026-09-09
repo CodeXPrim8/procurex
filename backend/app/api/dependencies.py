@@ -113,15 +113,24 @@ def _get_or_create_local_user(db: Session, supabase_user: dict) -> User:
             detail="Supabase user has no email",
         )
 
+    metadata = supabase_user.get("user_metadata") or {}
+    role_value = metadata.get("role", UserRole.BUYER.value)
+    try:
+        role = UserRole(role_value)
+    except ValueError:
+        role = UserRole.BUYER
+
+    has_vendor_meta = bool(
+        role == UserRole.VENDOR
+        or metadata.get("company_name")
+        or metadata.get("business_registration_number")
+        or metadata.get("domain")
+    )
+    if has_vendor_meta:
+        role = UserRole.VENDOR
+
     user = db.query(User).filter(User.email == email).first()
     if not user:
-        metadata = supabase_user.get("user_metadata") or {}
-        role_value = metadata.get("role", UserRole.BUYER.value)
-        try:
-            role = UserRole(role_value)
-        except ValueError:
-            role = UserRole.BUYER
-
         user = User(
             email=email,
             hashed_password="supabase",
@@ -132,6 +141,20 @@ def _get_or_create_local_user(db: Session, supabase_user: dict) -> User:
         db.add(user)
         db.commit()
         db.refresh(user)
+    else:
+        if metadata.get("full_name") and not user.full_name:
+            user.full_name = metadata.get("full_name")
+        if user.role == UserRole.VENDOR:
+            role = UserRole.VENDOR
+        elif has_vendor_meta and user.role != UserRole.VENDOR:
+            user.role = UserRole.VENDOR
+            role = UserRole.VENDOR
+            db.commit()
+            db.refresh(user)
+
+    if role == UserRole.VENDOR:
+        from ..services.vendor_service import ensure_vendor_for_user
+        ensure_vendor_for_user(db, user, supabase_user)
 
     return user
 

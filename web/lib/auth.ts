@@ -2,7 +2,17 @@ import { useRouter } from 'next/navigation'
 import { useEffect } from 'react'
 import type { User as SupabaseUser } from '@supabase/supabase-js'
 import { supabase } from './supabaseClient'
+import { rememberAccessToken } from './sessionToken'
 import { useStore, StoreUser } from './store'
+
+export function hasVendorAccountMarkers(metadata: Record<string, any> = {}) {
+  return Boolean(
+    metadata.role === 'vendor' ||
+    metadata.company_name ||
+    metadata.business_registration_number ||
+    metadata.domain
+  )
+}
 
 export const mapSupabaseUser = (supabaseUser: SupabaseUser | null): StoreUser | null => {
   if (!supabaseUser) return null
@@ -11,8 +21,61 @@ export const mapSupabaseUser = (supabaseUser: SupabaseUser | null): StoreUser | 
     id: supabaseUser.id,
     email: supabaseUser.email || '',
     full_name: metadata.full_name || supabaseUser.email || undefined,
-    role: metadata.role,
+    role: hasVendorAccountMarkers(metadata) ? 'vendor' : metadata.role,
   }
+}
+
+export async function persistVendorProfile(profile: {
+  company_name?: string
+  business_registration_number?: string
+  domain?: string
+  phone?: string
+  address?: string
+}) {
+  const metadata: Record<string, string> = { role: 'vendor' }
+  if (profile.company_name) metadata.company_name = profile.company_name
+  if (profile.business_registration_number) {
+    metadata.business_registration_number = profile.business_registration_number
+  }
+  if (profile.domain) metadata.domain = profile.domain
+  if (profile.phone) metadata.phone = profile.phone
+  if (profile.address) metadata.address = profile.address
+
+  const { data, error } = await supabase.auth.updateUser({ data: metadata })
+  if (error) {
+    console.error('Failed to persist vendor profile on auth account:', error)
+    return null
+  }
+  return mapSupabaseUser(data.user)
+}
+
+export async function syncVendorRole(user: StoreUser | null): Promise<StoreUser | null> {
+  if (!user) return user
+  if (user.role === 'vendor') return user
+  try {
+    const { vendorsAPI } = await import('./api')
+    const vendor = await vendorsAPI.getMyVendor()
+    if (!vendor?.company_name) return user
+    const restored = await persistVendorProfile({
+      company_name: vendor.company_name,
+      business_registration_number: vendor.business_registration_number,
+      domain: vendor.domain,
+      phone: vendor.phone,
+      address: vendor.address,
+    })
+    return restored || { ...user, role: 'vendor' }
+  } catch {
+    return user
+  }
+}
+
+export async function persistBuyerRole() {
+  const { data, error } = await supabase.auth.updateUser({ data: { role: 'buyer' } })
+  if (error) {
+    console.error('Failed to restore buyer role on auth account:', error)
+    return null
+  }
+  return mapSupabaseUser(data.user)
 }
 
 export function useAuth() {
@@ -26,26 +89,45 @@ export function useAuth() {
         const { data, error } = await supabase.auth.getSession()
         if (!mounted) return
         if (error) {
-          console.error('❌ Error getting Supabase session:', error)
-          console.error('Error details:', {
-            message: error.message,
-            status: error.status,
-            name: error.name
-          })
-          // If it's a credentials error, show a helpful message
-          if (error.message?.includes('Invalid') || error.message?.includes('JWT') || error.message?.includes('API key') || error.message?.includes('API')) {
-            console.error('❌ Invalid Supabase credentials detected!')
-            console.error('Troubleshooting steps:')
-            console.error('  1. Check your .env.local file has NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_ANON_KEY')
-            console.error('  2. Verify your Supabase project is active (not paused)')
-            console.error('  3. Go to Supabase Dashboard > Settings > API to verify your credentials')
-            console.error('  4. Restart your Next.js dev server after updating .env.local')
-          }
-          setAuthReady(true)
-          return
+          console.warn('getSession warning:', error.message)
         }
-        console.log('✅ Auth initialized successfully', data.session ? '(user logged in)' : '(no session)')
-        setUser(mapSupabaseUser(data.session?.user ?? null))
+        let session = data?.session
+        if (!session?.access_token) {
+          const { data: userData } = await supabase.auth.getUser()
+          if (userData?.user) {
+            const refreshed = await supabase.auth.getSession()
+            session = refreshed.data.session ?? session
+          }
+        }
+        if (!session?.access_token) {
+          try {
+            const refreshed = await supabase.auth.refreshSession()
+            session = refreshed.data.session ?? session
+          } catch (refreshError) {
+            console.warn('Could not refresh session:', refreshError)
+          }
+        }
+        if (session?.access_token) {
+          rememberAccessToken(session.access_token)
+        }
+        console.log('✅ Auth initialized successfully', session ? '(user logged in)' : '(no session)')
+        const mapped = mapSupabaseUser(session?.user ?? null)
+        const metadata = session?.user?.user_metadata || {}
+        if (mapped && metadata.role !== 'vendor' && hasVendorAccountMarkers(metadata)) {
+          const restored = await persistVendorProfile({
+            company_name: metadata.company_name,
+            business_registration_number: metadata.business_registration_number,
+            domain: metadata.domain,
+            phone: metadata.phone,
+            address: metadata.address,
+          })
+          if (!mounted) return
+          setUser(restored || mapped)
+        } else {
+          const synced = await syncVendorRole(mapped)
+          if (!mounted) return
+          setUser(synced)
+        }
         setAuthReady(true)
       } catch (error: any) {
         console.error('❌ Failed to initialize auth:', error)
@@ -58,7 +140,12 @@ export function useAuth() {
     }
     init()
 
-    const { data: listener } = supabase.auth.onAuthStateChange((_event, session) => {
+    const { data: listener } = supabase.auth.onAuthStateChange((event, session) => {
+      if (session?.access_token) {
+        rememberAccessToken(session.access_token)
+      } else if (event === 'SIGNED_OUT') {
+        rememberAccessToken(null)
+      }
       if (mounted) {
         setUser(mapSupabaseUser(session?.user ?? null))
       }

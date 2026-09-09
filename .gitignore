@@ -62,3 +62,6 @@ logs/
 *.log
 
 
+.vercel
+.env*
+uploads/

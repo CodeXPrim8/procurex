@@ -9,7 +9,6 @@ import {
   ShoppingCart,
   FileText,
   Package,
-  Lock,
   Search,
   BookOpen,
   Folder,
@@ -17,7 +16,11 @@ import {
   Settings,
   User,
   LogOut,
-  ChevronUp
+  ChevronUp,
+  Building2,
+  Mic,
+  MicOff,
+  AudioLines
 } from 'lucide-react'
 import Link from 'next/link'
 import Image from 'next/image'
@@ -29,9 +32,84 @@ import ChatMessage from '@/components/ChatMessage'
 import ProductCard from '@/components/ProductCard'
 import Button from '@/components/ui/Button'
 import { showToast } from '@/lib/toast'
-import { supabase } from '@/lib/supabaseClient'
+import { getAccessToken } from '@/lib/sessionToken'
+import { naturalChatTitle } from '@/lib/chatTitle'
 import { formatPriceRange, getCurrencySymbol } from '@/lib/currency'
 import SpeedTest from '@/components/SpeedTest'
+import { useVoiceChat } from '@/lib/useVoiceChat'
+
+const LAST_CHAT_KEY = 'procurex_last_chat_id'
+
+function isBlankChat(session: any) {
+  const title = (session?.title || 'New chat').trim().toLowerCase()
+  const untitled = !title || title === 'new chat' || title === 'newchat'
+  const messages = session?.messages
+  return untitled && (!messages || messages.length === 0)
+}
+
+function persistGuestSessions(updatedSession: any) {
+  const localSessions = localStorage.getItem('temp_chat_sessions')
+  const stored = localSessions ? JSON.parse(localSessions) : []
+  const nextList = [
+    updatedSession,
+    ...stored.filter((item: any) => item.id !== updatedSession.id),
+  ]
+  localStorage.setItem('temp_chat_sessions', JSON.stringify(nextList))
+  return nextList
+}
+
+function rememberChat(id: number | undefined) {
+  if (!id || typeof window === 'undefined') return
+  try {
+    localStorage.setItem(LAST_CHAT_KEY, String(id))
+  } catch {
+    // ignore storage errors
+  }
+}
+
+function readLastChatId(): number | null {
+  if (typeof window === 'undefined') return null
+  try {
+    const raw = localStorage.getItem(LAST_CHAT_KEY)
+    const parsed = raw ? Number(raw) : NaN
+    return Number.isFinite(parsed) ? parsed : null
+  } catch {
+    return null
+  }
+}
+
+function mergeSessionLists(serverList: any[], localList: any[]) {
+  const byId = new Map<number, any>()
+  for (const item of serverList) {
+    if (item?.id == null) continue
+    byId.set(item.id, { ...item, messages: item.messages || [] })
+  }
+  for (const item of localList) {
+    if (item?.id == null) continue
+    const existing = byId.get(item.id)
+    if (!existing) {
+      byId.set(item.id, item)
+      continue
+    }
+    const existingTitle = (existing.title || '').trim()
+    const localTitle = (item.title || '').trim()
+    const preferLocal =
+      localTitle &&
+      localTitle.toLowerCase() !== 'new chat' &&
+      (!existingTitle || existingTitle.toLowerCase() === 'new chat')
+    byId.set(item.id, {
+      ...existing,
+      ...item,
+      title: preferLocal ? localTitle : existingTitle || localTitle,
+      messages: existing.messages?.length ? existing.messages : item.messages || [],
+    })
+  }
+  return Array.from(byId.values()).sort((a, b) => {
+    const tb = new Date(b.updated_at || b.created_at || 0).getTime()
+    const ta = new Date(a.updated_at || a.created_at || 0).getTime()
+    return tb - ta
+  })
+}
 
 export default function ChatPage() {
   const { user, isAuthenticated, authReady } = useAuth()
@@ -39,7 +117,6 @@ export default function ChatPage() {
   const [input, setInput] = useState('')
   const [isLoading, setIsLoading] = useState(false)
   const [productResults, setProductResults] = useState<any[]>([])
-  const [sessions, setSessions] = useState<any[]>([])
   const [showSidebar, setShowSidebar] = useState(true)
   const [showUserMenu, setShowUserMenu] = useState(false)
   const [showUserMenuHeader, setShowUserMenuHeader] = useState(false)
@@ -50,12 +127,30 @@ export default function ChatPage() {
   const [showSearchModal, setShowSearchModal] = useState(false)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const wsRef = useRef<WebSocket | null>(null)
+  const wsSessionIdRef = useRef<number | null>(null)
   const userMenuRef = useRef<HTMLDivElement>(null)
   const userMenuHeaderRef = useRef<HTMLDivElement>(null)
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null)
   const reconnectAttemptsRef = useRef(0)
+  const backgroundRetryRef = useRef(0)
   
   const { currentSession, setCurrentSession, addMessage, setMessages, logout } = useStore()
+  const [sessions, setSessions] = useState<any[]>([])
+  const [sessionsLoading, setSessionsLoading] = useState(false)
+  const [clientReady, setClientReady] = useState(false)
+  const currentSessionRef = useRef(currentSession)
+  currentSessionRef.current = currentSession
+  const handleSendRef = useRef<(preset?: string) => Promise<void>>(async () => {})
+
+  const voice = useVoiceChat({
+    busy: isLoading,
+    onInterim: (text) => setInput(text),
+    onFinalTranscript: (text) => {
+      setInput('')
+      void handleSendRef.current(text)
+    },
+    onError: (message) => showToast(message, 'error'),
+  })
 
   // Check backend health with better error handling
   const checkBackendHealth = async (): Promise<boolean> => {
@@ -135,55 +230,137 @@ export default function ChatPage() {
     }
   }, [isAuthenticated, wsConnected, backendAvailable])
 
-  useEffect(() => {
-    // Wait for auth to be ready before loading sessions
-    if (!authReady) {
-      return
-    }
+  const isServerSession = (id: unknown) =>
+    typeof id === 'number' && id > 0 && id < 1_000_000_000
 
-    if (isAuthenticated) {
-      loadSessions()
-      // Only create new session if we don't have one and sessions are loaded
-      // This prevents creating a new session on every refresh
-      if (!currentSession) {
-        // Wait a bit for sessions to load, then create if still no session
-        setTimeout(() => {
-          if (!currentSession) {
-            createNewSession()
-          }
-        }, 500)
+  const sessionLabel = (session: any) =>
+    session?.title?.trim() || `Chat ${session?.id ?? ''}`
+
+  useEffect(() => {
+    setClientReady(true)
+  }, [])
+
+  useEffect(() => {
+    if (!authReady) return
+    if (user?.role === 'vendor') {
+      router.replace('/vendor')
+    }
+  }, [authReady, user?.role, router])
+
+  useEffect(() => {
+    if (!authReady) return
+    if (user?.role === 'vendor') return
+    let cancelled = false
+
+    const initGuest = () => {
+      let parsed: any[] = []
+      try {
+        const localSessions = localStorage.getItem('temp_chat_sessions')
+        parsed = localSessions ? JSON.parse(localSessions) : []
+        if (!Array.isArray(parsed)) parsed = []
+      } catch {
+        parsed = []
       }
-    } else {
-      // For unauthenticated users, load from localStorage
-      const localSessions = localStorage.getItem('temp_chat_sessions')
-      if (localSessions) {
-        const sessions = JSON.parse(localSessions)
-        setSessions(sessions)
-        // Set the most recent session as current
-        if (sessions.length > 0 && !currentSession) {
-          const latestSession = sessions[sessions.length - 1]
-          setCurrentSession(latestSession)
-        }
-      }
-      // Create a new session if none exists
-      if (!currentSession) {
+      if (cancelled) return
+
+      const current = currentSessionRef.current
+      const keepCurrent =
+        current && !isServerSession(current.id)
+          ? [current]
+          : []
+      let ordered = mergeSessionLists(parsed, keepCurrent)
+
+      if (ordered.length === 0) {
         const tempSession = {
           id: Date.now(),
-          title: 'New Chat',
+          title: 'New chat',
           messages: [],
           created_at: new Date().toISOString(),
           updated_at: new Date().toISOString(),
         }
         setCurrentSession(tempSession as any)
+        setSessions([tempSession])
+        rememberChat(tempSession.id)
+        localStorage.setItem('temp_chat_sessions', JSON.stringify([tempSession]))
+        return
+      }
+
+      setSessions(ordered)
+      localStorage.setItem('temp_chat_sessions', JSON.stringify(ordered))
+      if (!current || isServerSession(current.id)) {
+        const lastId = readLastChatId()
+        const preferred =
+          ordered.find((item) => item.id === lastId) || ordered[0]
+        setCurrentSession(preferred)
+        rememberChat(preferred.id)
       }
     }
-  }, [authReady, isAuthenticated])
 
-  useEffect(() => {
-    if (currentSession?.id) {
-      loadMessages()
+    const initAuthed = async () => {
+      setSessionsLoading(true)
+      try {
+        const data = await chatAPI.getSessions()
+        if (cancelled) return
+        const list = Array.isArray(data) ? data : []
+        setSessions((prev) => mergeSessionLists(list, prev))
+        const current = currentSessionRef.current
+        const currentIsServer = current && isServerSession(current.id)
+        if (currentIsServer) {
+          rememberChat(current.id)
+          if (!current.messages || current.messages.length === 0) {
+            try {
+              const full = await chatAPI.getSession(current.id)
+              if (!cancelled && currentSessionRef.current?.id === current.id) {
+                setCurrentSession({ ...full, messages: full.messages || [] })
+              }
+            } catch {
+              // keep the local session if history cannot be refreshed
+            }
+          }
+        } else {
+          const lastId = readLastChatId()
+          const preferred =
+            list.find((item: any) => item.id === lastId) || list[0]
+          if (preferred) {
+            try {
+              const full = await chatAPI.getSession(preferred.id)
+              if (!cancelled) {
+                setCurrentSession({ ...full, messages: full.messages || [] })
+                rememberChat(full.id)
+              }
+            } catch {
+              if (!cancelled) {
+                setCurrentSession({ ...preferred, messages: [] })
+                rememberChat(preferred.id)
+              }
+            }
+          } else {
+            const session = await chatAPI.createSession('New chat')
+            if (!cancelled) {
+              const next = { ...session, messages: [], title: session.title || 'New chat' }
+              setCurrentSession(next)
+              setSessions((prev) => mergeSessionLists([next], prev))
+              rememberChat(session.id)
+            }
+          }
+        }
+      } catch (error) {
+        console.error('Failed to load chats:', error)
+      } finally {
+        if (!cancelled) setSessionsLoading(false)
+      }
     }
-  }, [currentSession?.id])
+
+    if (isAuthenticated) {
+      void initAuthed()
+    } else {
+      initGuest()
+    }
+
+    return () => {
+      cancelled = true
+    }
+  }, [authReady, isAuthenticated, user?.role, setCurrentSession])
 
   useEffect(() => {
     // Wait for auth to be ready before attempting connection
@@ -207,48 +384,63 @@ export default function ChatPage() {
       return
     }
 
-    // Only connect if we have a valid session ID (not a temporary local session)
-    // Temporary sessions have timestamp IDs, real sessions have numeric IDs
     const sessionId = currentSession.id
-    if (typeof sessionId === 'number' && sessionId > 0) {
-      // Check if already connected to avoid duplicate connections
-      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-        console.log('✅ WebSocket already connected')
-        setWsConnected(true)
-        return
-      }
-
-      const connect = async () => {
-        console.log('🔌 Connecting WebSocket for session:', sessionId)
+    if (!isServerSession(sessionId)) {
+      if (wsRef.current) {
         try {
-          const connected = await connectWebSocket(sessionId, 0, false)
-          if (!connected) {
-            console.log('⚠️ WebSocket connection failed, will retry...')
-            // Retry after a short delay
-            setTimeout(() => {
-              if (currentSession?.id === sessionId && isAuthenticated) {
-                connectWebSocket(sessionId, 0, true)
-              }
-            }, 2000)
-          }
-        } catch (error) {
-          console.error('Failed to connect WebSocket:', error)
-          setWsConnected(false)
-          setIsReconnecting(false)
-          // Retry after delay
-          setTimeout(() => {
-            if (currentSession?.id === sessionId && isAuthenticated) {
-              connectWebSocket(sessionId, 0, true)
-            }
-          }, 3000)
+          wsRef.current.close(1000, 'Temporary session')
+        } catch {
+          // ignore
         }
+        wsRef.current = null
       }
-      connect()
-    } else {
-      // Temporary session, don't try to connect WebSocket
+      wsSessionIdRef.current = null
       setWsConnected(false)
       setIsReconnecting(false)
+      return
     }
+
+    if (
+      wsRef.current &&
+      wsRef.current.readyState === WebSocket.OPEN &&
+      wsSessionIdRef.current === sessionId
+    ) {
+      setWsConnected(true)
+      return
+    }
+
+    if (wsRef.current && wsSessionIdRef.current !== sessionId) {
+      try {
+        wsRef.current.close(1000, 'Switching chat')
+      } catch {
+        // ignore
+      }
+      wsRef.current = null
+      wsSessionIdRef.current = null
+    }
+
+    const connect = async () => {
+      try {
+        const connected = await connectWebSocket(sessionId, 0, false)
+        if (!connected) {
+          setTimeout(() => {
+            if (currentSessionRef.current?.id === sessionId && isAuthenticated) {
+              connectWebSocket(sessionId, 0, true)
+            }
+          }, 2000)
+        }
+      } catch (error) {
+        console.error('Failed to connect WebSocket:', error)
+        setWsConnected(false)
+        setIsReconnecting(false)
+        setTimeout(() => {
+          if (currentSessionRef.current?.id === sessionId && isAuthenticated) {
+            connectWebSocket(sessionId, 0, true)
+          }
+        }, 3000)
+      }
+    }
+    connect()
 
     return () => {
       // Don't close on unmount if we're just refreshing - let it reconnect
@@ -269,9 +461,12 @@ export default function ChatPage() {
     const handleVisibilityChange = () => {
       if (document.visibilityState === 'visible') {
         // Page became visible, check if we need to reconnect
-        if (isAuthenticated && currentSession?.id && typeof currentSession.id === 'number') {
-          if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
-            console.log('Page visible, reconnecting WebSocket...')
+        if (isAuthenticated && isServerSession(currentSession?.id)) {
+          if (
+            !wsRef.current ||
+            wsRef.current.readyState !== WebSocket.OPEN ||
+            wsSessionIdRef.current !== currentSession.id
+          ) {
             connectWebSocket(currentSession.id, 0, true)
           }
         }
@@ -280,9 +475,12 @@ export default function ChatPage() {
 
     // Also handle page focus
     const handleFocus = () => {
-      if (isAuthenticated && currentSession?.id && typeof currentSession.id === 'number') {
-        if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
-          console.log('Page focused, reconnecting WebSocket...')
+      if (isAuthenticated && isServerSession(currentSession?.id)) {
+        if (
+          !wsRef.current ||
+          wsRef.current.readyState !== WebSocket.OPEN ||
+          wsSessionIdRef.current !== currentSession.id
+        ) {
           connectWebSocket(currentSession.id, 0, true)
         }
       }
@@ -297,91 +495,74 @@ export default function ChatPage() {
     }
   }, [isAuthenticated, currentSession?.id])
 
-  const loadSessions = async () => {
-    if (!isAuthenticated) {
-      // For unauthenticated users, use local storage
-      const localSessions = localStorage.getItem('temp_chat_sessions')
-      if (localSessions) {
-        setSessions(JSON.parse(localSessions))
-      }
+  const createNewSession = async () => {
+    if (!authReady) return
+
+    const blankInSidebar =
+      isBlankChat(currentSession) &&
+      sessions.some((item) => item.id === currentSession?.id)
+    if (blankInSidebar) {
+      setProductResults([])
       return
     }
 
-    try {
-      const data = await chatAPI.getSessions()
-      setSessions(data)
-    } catch (error: any) {
-      if (error.response?.status === 401) {
-        // User not authenticated, use local storage
-        const localSessions = localStorage.getItem('temp_chat_sessions')
-        if (localSessions) {
-          setSessions(JSON.parse(localSessions))
-        }
-      } else {
-        console.error('Failed to load sessions:', error)
-      }
-    }
-  }
-
-  const createNewSession = async () => {
     if (!isAuthenticated) {
-      // Check chat limit for unauthenticated users
       const localSessions = localStorage.getItem('temp_chat_sessions')
       const existingSessions = localSessions ? JSON.parse(localSessions) : []
-      const chatLimit = 5 // Free users get 5 chats
-      
+      const chatLimit = 5
+
       if (existingSessions.length >= chatLimit) {
         showToast('Chat limit reached. Please login for unlimited chats.', 'warning')
         router.push('/login?redirect=/chat')
         return
       }
 
-        // Create temporary session for unauthenticated users
-        const tempSession = {
-          id: Date.now(),
-          title: 'New Chat',
-          messages: [],
-          created_at: new Date().toISOString(),
-          updated_at: new Date().toISOString(),
-        }
-        const updatedSessions = [...existingSessions, tempSession]
-        localStorage.setItem('temp_chat_sessions', JSON.stringify(updatedSessions))
-        setCurrentSession(tempSession as any)
-        setSessions(updatedSessions)
-        return
+      const tempSession = {
+        id: Date.now(),
+        title: 'New chat',
+        messages: [],
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
       }
+      const updatedSessions = [tempSession, ...existingSessions]
+      localStorage.setItem('temp_chat_sessions', JSON.stringify(updatedSessions))
+      setCurrentSession(tempSession as any)
+      setSessions(updatedSessions)
+      rememberChat(tempSession.id)
+      setProductResults([])
+      return
+    }
 
     try {
-      const session = await chatAPI.createSession()
-      setCurrentSession({ ...session, messages: [] })
-      loadSessions()
+      const session = await chatAPI.createSession('New chat')
+      const next = {
+        ...session,
+        messages: [],
+        title: session.title || 'New chat',
+        updated_at: session.updated_at || new Date().toISOString(),
+      }
+      setCurrentSession(next)
+      setSessions((prev) => [next, ...prev.filter((item) => item.id !== session.id)])
+      rememberChat(session.id)
+      setProductResults([])
     } catch (error: any) {
       if (error.response?.status === 401) {
         showToast('Please login to create new chats', 'warning')
         router.push('/login?redirect=/chat')
       } else {
         console.error('Failed to create session:', error)
+        showToast('Could not start a new chat. Try again.', 'error')
       }
     }
   }
 
-  const loadMessages = async () => {
-    if (!currentSession?.id) return
-    try {
-      const session = await chatAPI.getSession(currentSession.id)
-      setMessages(session.messages || [])
-    } catch (error) {
-      console.error('Failed to load messages:', error)
-    }
-  }
-
   const selectSession = async (sessionId: number) => {
-    if (!isAuthenticated) {
-      // For unauthenticated users, load from local storage
+    rememberChat(sessionId)
+    if (!isAuthenticated || !isServerSession(sessionId)) {
       const localSessions = localStorage.getItem('temp_chat_sessions')
       if (localSessions) {
-        const sessions = JSON.parse(localSessions)
-        const session = sessions.find((s: any) => s.id === sessionId)
+        const list = JSON.parse(localSessions)
+        const session = list.find((item: any) => item.id === sessionId)
         if (session) {
           setCurrentSession(session)
         }
@@ -391,13 +572,20 @@ export default function ChatPage() {
 
     try {
       const session = await chatAPI.getSession(sessionId)
-      setCurrentSession(session)
+      setCurrentSession({ ...session, messages: session.messages || [] })
+      setSessions((prev) =>
+        prev.map((item) =>
+          item.id === session.id ? { ...item, title: session.title || item.title } : item
+        )
+      )
+      setProductResults([])
     } catch (error: any) {
       if (error.response?.status === 401) {
         showToast('Please login to view chat history', 'warning')
         router.push('/login?redirect=/chat')
       } else {
         console.error('Failed to load session:', error)
+        showToast('Could not open that chat.', 'error')
       }
     }
   }
@@ -406,8 +594,7 @@ export default function ChatPage() {
     const maxRetries = 3 // Allow more retries for better reliability
     
     // Get fresh session token
-    const { data } = await supabase.auth.getSession()
-    const token = data.session?.access_token || ''
+    const token = (await getAccessToken()) || ''
     if (!token) {
       console.warn('No auth token available, user may need to login')
       if (isAuthenticated) {
@@ -428,44 +615,27 @@ export default function ChatPage() {
     const wsUrl = `${wsProtocol}${wsHost}/api/v1/chat/ws/${sessionId}?token=${token}`
     
     return new Promise((resolve) => {
-      // If already connected to the same session, don't reconnect
-      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-        console.log('✅ WebSocket already connected, skipping reconnect')
+      if (
+        wsRef.current &&
+        wsRef.current.readyState === WebSocket.OPEN &&
+        wsSessionIdRef.current === sessionId
+      ) {
         setWsConnected(true)
         setIsReconnecting(false)
         resolve(true)
         return
       }
-    
-      // Close existing connection if any (but only if it's not already open or connecting)
+
       if (wsRef.current) {
-        const currentState = wsRef.current.readyState
-        if (currentState === WebSocket.CONNECTING || currentState === WebSocket.OPEN) {
-          // Don't close if connecting or open, just resolve
-          if (currentState === WebSocket.OPEN) {
-            setWsConnected(true)
-            resolve(true)
-            return
-          }
-          // If connecting, wait a bit
-          setTimeout(() => {
-            if (wsRef.current?.readyState === WebSocket.OPEN) {
-              setWsConnected(true)
-              resolve(true)
-            } else {
-              // Continue with new connection
-              connectWebSocket(sessionId, retryCount, isReconnect).then(resolve)
-            }
-          }, 1000)
-          return
-        }
-        // Close if closing or closed
         try {
-          wsRef.current.close()
-        } catch (e) {
-          // Ignore errors when closing
+          wsRef.current.close(1000, 'Reconnecting')
+        } catch {
+          // ignore
         }
         wsRef.current = null
+        if (wsSessionIdRef.current === sessionId) {
+          wsSessionIdRef.current = null
+        }
       }
     
       if (isReconnect) {
@@ -485,7 +655,6 @@ export default function ChatPage() {
           } else {
             setIsReconnecting(false)
             setWsConnected(false)
-            showToast('Failed to connect. Please refresh the page.', 'error')
             resolve(false)
           }
         }
@@ -495,14 +664,16 @@ export default function ChatPage() {
 
       ws.onopen = () => {
         clearTimeout(connectionTimeout)
-        console.log('WebSocket connected')
+        wsSessionIdRef.current = sessionId
         setWsConnected(true)
         setIsReconnecting(false)
         reconnectAttemptsRef.current = 0
+        backgroundRetryRef.current = 0
         resolve(true)
       }
 
     ws.onmessage = (event) => {
+        if (wsRef.current !== ws || currentSessionRef.current?.id !== sessionId) return
         try {
       const data = JSON.parse(event.data)
       
@@ -535,10 +706,63 @@ export default function ChatPage() {
             return [...updated, { role: 'assistant' as const, content: data.content }]
           }
         })
+      } else if (data.type === 'title') {
+        if (data.title && wsSessionIdRef.current) {
+          const sid = wsSessionIdRef.current
+          setSessions((prev) =>
+            prev.map((item) => (item.id === sid ? { ...item, title: data.title } : item))
+          )
+          const current = currentSessionRef.current
+          if (current?.id === sid) {
+            setCurrentSession({
+              ...current,
+              title: data.title,
+              messages: current.messages || [],
+            })
+          }
+        }
       } else if (data.type === 'done') {
         setIsLoading(false)
         if (data.product_results) {
           setProductResults(data.product_results)
+        }
+        if (data.title && wsSessionIdRef.current) {
+          const sid = wsSessionIdRef.current
+          setSessions((prev) =>
+            prev.map((item) => (item.id === sid ? { ...item, title: data.title } : item))
+          )
+          const current = currentSessionRef.current
+          if (current?.id === sid) {
+            setCurrentSession({
+              ...current,
+              title: data.title,
+              messages: current.messages || [],
+            })
+          }
+        }
+        const sid = wsSessionIdRef.current
+        if (sid && isServerSession(sid) && !data.title) {
+          chatAPI
+            .getSession(sid)
+            .then((full) => {
+              if (!full) return
+              setSessions((prev) =>
+                prev.map((item) =>
+                  item.id === full.id
+                    ? { ...item, title: full.title || item.title, updated_at: full.updated_at }
+                    : item
+                )
+              )
+              const current = currentSessionRef.current
+              if (current?.id === full.id && full.title) {
+                setCurrentSession({
+                  ...current,
+                  title: full.title,
+                  messages: current.messages || [],
+                })
+              }
+            })
+            .catch(() => {})
         }
       } else if (data.type === 'error') {
         setIsLoading(false)
@@ -563,6 +787,7 @@ export default function ChatPage() {
     }
 
       ws.onerror = (error) => {
+        if (wsRef.current !== ws) return
         clearTimeout(connectionTimeout)
         console.error('WebSocket error:', error)
         setWsConnected(false)
@@ -571,6 +796,13 @@ export default function ChatPage() {
 
       ws.onclose = (event) => {
         clearTimeout(connectionTimeout)
+        if (wsRef.current !== ws) {
+          resolve(false)
+          return
+        }
+        if (wsSessionIdRef.current === sessionId) {
+          wsSessionIdRef.current = null
+        }
         setWsConnected(false)
         
         const closeReasons: { [key: number]: string } = {
@@ -623,35 +855,27 @@ export default function ChatPage() {
             
             // Check if backend is available before showing error
             checkBackendHealth().then((backendHealthy) => {
+              if (backgroundRetryRef.current >= 8) {
+                return
+              }
+              backgroundRetryRef.current += 1
               if (backendHealthy) {
-                // Backend is healthy, retry connection after delay
-                console.log('Backend is healthy. Retrying WebSocket connection in 5 seconds...')
+                console.log('Retrying chat connection in 5 seconds...')
                 setTimeout(() => {
                   if (currentSession?.id && typeof currentSession.id === 'number') {
                     connectWebSocket(currentSession.id, 0, true)
                   }
                 }, 5000)
-                showToast('Connection lost. Reconnecting automatically...', 'info')
               } else {
-                // Backend is down
-                const errorMsg = 'Connection lost. The backend server may be down. Auto-restarting...'
-                showToast(errorMsg, 'error')
-                // Add helpful message to chat
-                setMessages((prev) => [...prev, { 
-                  role: 'assistant' as const, 
-                  content: '⚠️ **Connection Lost**\n\nThe WebSocket connection failed. The backend watchdog is attempting to restart the server automatically.\n\n**What\'s happening:**\n- Backend server is restarting\n- This usually takes 10-30 seconds\n- Connection will be restored automatically\n\n**You can:**\n- Wait for automatic reconnection\n- Click the "Reconnect" button in the header\n- Or refresh the page'
-                }])
-                
-                // Retry after longer delay when backend is down
                 setTimeout(() => {
                   if (currentSession?.id && typeof currentSession.id === 'number') {
                     connectWebSocket(currentSession.id, 0, true)
                   }
-                }, 15000) // Wait 15 seconds for backend to restart
+                }, 15000)
               }
             }).catch(() => {
-              // If health check fails, assume backend is down and retry
-              showToast('Connection lost. Reconnecting automatically...', 'info')
+              if (backgroundRetryRef.current >= 8) return
+              backgroundRetryRef.current += 1
               setTimeout(() => {
                 if (currentSession?.id && typeof currentSession.id === 'number') {
                   connectWebSocket(currentSession.id, 0, true)
@@ -659,8 +883,7 @@ export default function ChatPage() {
               }, 5000)
             })
           } else {
-            showToast(`Connection closed: ${reason}. Will retry...`, 'warning')
-            // Retry after delay for other errors
+            console.log(`Connection closed: ${reason}. Retrying in background.`)
             setTimeout(() => {
               if (currentSession?.id && typeof currentSession.id === 'number') {
                 connectWebSocket(currentSession.id, 0, true)
@@ -673,26 +896,10 @@ export default function ChatPage() {
     })
   }
 
-  const handleSend = async () => {
-    if (!input.trim() || !currentSession || isLoading) return
-
-    const userMessage = input.trim()
-    
-    // Check if message is asking for prices/products and user is not authenticated
-    const priceKeywords = ['price', 'cost', 'buy', 'purchase', 'available', 'stock', 'product', 'laptop', 'phone', 'tablet', 'monitor']
-    const isPriceQuery = priceKeywords.some(keyword => userMessage.toLowerCase().includes(keyword))
-    
-    if (isPriceQuery && !isAuthenticated) {
-      showToast('Please login to get product prices and availability', 'warning')
-      setInput('')
-      // Show login prompt
-      setTimeout(() => {
-        if (confirm('Login required for pricing information. Would you like to login now?')) {
-          router.push('/login?redirect=/chat')
-        }
-      }, 500)
-      return
-    }
+  const handleSend = async (preset?: string) => {
+    if (!currentSession || isLoading) return
+    const userMessage = (typeof preset === 'string' ? preset : input || '').trim()
+    if (!userMessage) return
 
     setInput('')
     setIsLoading(true)
@@ -700,6 +907,23 @@ export default function ChatPage() {
 
     const userMsg = { role: 'user' as const, content: userMessage }
     addMessage(userMsg)
+    const generated = naturalChatTitle(userMessage, currentSession.title)
+    const nextTitle = generated || currentSession.title || 'New chat'
+    setSessions((prev) => {
+      const now = new Date().toISOString()
+      const rest = prev.filter((item) => item.id !== currentSession.id)
+      const current = prev.find((item) => item.id === currentSession.id)
+      return [
+        {
+          ...(current || currentSession),
+          id: currentSession.id,
+          title: nextTitle || current?.title || currentSession.title || 'New chat',
+          updated_at: now,
+          messages: current?.messages || currentSession.messages || [],
+        },
+        ...rest,
+      ]
+    })
 
     // For unauthenticated users, provide helpful AI-like responses
       if (!isAuthenticated) {
@@ -707,18 +931,12 @@ export default function ChatPage() {
         const updatedMessages = [...(currentSession?.messages || []), userMsg]
         const updatedSession = {
           ...currentSession,
+          title: nextTitle || currentSession.title,
           messages: updatedMessages,
+          updated_at: new Date().toISOString(),
         }
         setCurrentSession(updatedSession as any)
-        
-        // Update local storage
-        const localSessions = localStorage.getItem('temp_chat_sessions')
-        const sessions = localSessions ? JSON.parse(localSessions) : []
-        const sessionIndex = sessions.findIndex((s: any) => s.id === currentSession?.id)
-        if (sessionIndex >= 0) {
-          sessions[sessionIndex] = updatedSession
-          localStorage.setItem('temp_chat_sessions', JSON.stringify(sessions))
-        }
+        setSessions(persistGuestSessions(updatedSession))
 
       // Generate helpful AI-like response based on query
         setTimeout(() => {
@@ -757,10 +975,7 @@ export default function ChatPage() {
             messages: finalMessages,
           }
           setCurrentSession(finalSession as any)
-          if (sessionIndex >= 0) {
-            sessions[sessionIndex] = finalSession
-            localStorage.setItem('temp_chat_sessions', JSON.stringify(sessions))
-          }
+          setSessions(persistGuestSessions(finalSession))
           
           setIsLoading(false)
       }, 500)
@@ -784,27 +999,12 @@ export default function ChatPage() {
       
       // Save message via REST API
       try {
-      await chatAPI.createMessage(currentSession.id, userMessage)
+        await chatAPI.createMessage(currentSession.id, userMessage)
       } catch (e) {
         console.error('Failed to save message:', e)
       }
 
-      // Simulate streaming response using REST API
-      // First, get a basic response
-      const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
-      
       try {
-        // Try to get AI response via a simple endpoint or use fallback
-        const response = await fetch(`${apiUrl}/api/v1/chat/sessions/${currentSession.id}/messages`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${(await supabase.auth.getSession()).data.session?.access_token || ''}`
-          },
-          body: JSON.stringify({ content: userMessage, role: 'user' })
-        })
-
-        // Generate intelligent contextual response
         let assistantResponse = ""
         const lowerMessage = userMessage.toLowerCase().trim()
         const currencySymbol = await getCurrencySymbol()
@@ -882,6 +1082,11 @@ export default function ChatPage() {
         }
 
         setIsLoading(false)
+        try {
+          await chatAPI.createMessage(currentSession.id, assistantResponse, 'assistant')
+        } catch (error) {
+          console.error('Failed to save assistant message:', error)
+        }
       } catch (apiError: any) {
         console.error('API error:', apiError)
         // Use same intelligent fallback as above
@@ -940,6 +1145,11 @@ export default function ChatPage() {
         }
 
         setIsLoading(false)
+        try {
+          await chatAPI.createMessage(currentSession.id, assistantResponse, 'assistant')
+        } catch (error) {
+          console.error('Failed to save assistant message:', error)
+        }
       }
     } catch (error: any) {
         console.error('Failed to send message:', error)
@@ -951,6 +1161,16 @@ export default function ChatPage() {
       setIsLoading(false)
     }
   }
+
+  handleSendRef.current = handleSend
+
+  useEffect(() => {
+    if (isLoading) return
+    const last = currentSession?.messages?.[currentSession.messages.length - 1]
+    if (last?.role === 'assistant' && last.content) {
+      voice.speakReply(last.content)
+    }
+  }, [isLoading, currentSession?.messages, voice.speakReply])
 
   const handleKeyPress = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -987,23 +1207,25 @@ export default function ChatPage() {
     }
   }, [showUserMenu, showUserMenuHeader])
 
-  // Check if user has reached chat limit (for non-authenticated or free users)
-  const chatLimit = isAuthenticated ? Infinity : 5 // Free users get 5 chats
-  const localSessionsCount = !isAuthenticated ? (() => {
-    if (typeof window !== 'undefined') {
-      const local = localStorage.getItem('temp_chat_sessions')
-      return local ? JSON.parse(local).length : 0
-    }
-    return 0
-  })() : 0
-  const totalSessions = isAuthenticated ? sessions.length : localSessionsCount
-  const remainingChats = isAuthenticated ? Infinity : Math.max(0, chatLimit - totalSessions)
-  const hasReachedLimit = !isAuthenticated && totalSessions >= chatLimit
+  // Guest chat limit — count localStorage only after mount to avoid hydration mismatch
+  const chatLimit = 5
+  const localSessionsCount = clientReady && !isAuthenticated
+    ? (() => {
+        try {
+          const local = localStorage.getItem('temp_chat_sessions')
+          return local ? JSON.parse(local).length : 0
+        } catch {
+          return 0
+        }
+      })()
+    : 0
+  const remainingChats = Math.max(0, chatLimit - localSessionsCount)
+  const hasReachedLimit = clientReady && !isAuthenticated && localSessionsCount >= chatLimit
 
   return (
     <div className="fixed inset-0 top-0 flex bg-[#212121] overflow-hidden">
       {/* Sidebar - Navigation & Chat History (ChatGPT style) */}
-      <div className={`${showSidebar ? 'w-64' : 'w-0'} hidden md:block bg-[#171717] border-r border-[#2f2f2f] transition-all duration-300 overflow-hidden flex flex-col relative`}>
+      <div className={`${showSidebar ? 'w-64' : 'w-0'} hidden md:flex md:flex-col h-full bg-[#171717] border-r border-[#2f2f2f] transition-all duration-300 overflow-hidden relative`}>
         {/* New Chat Button */}
           <div className="p-3 border-b border-[#2f2f2f]">
           <Button
@@ -1027,19 +1249,26 @@ export default function ChatPage() {
         <div className="p-2 border-b border-[#2f2f2f] space-y-1">
           <p className="text-xs text-[#b4b4b4] px-3 py-2 uppercase tracking-wider">Menu</p>
           <button 
-            onClick={() => setShowSearchModal(true)}
+            onClick={() => {
+              setSearchQuery('')
+              setShowSearchModal(true)
+            }}
             className="w-full flex items-center space-x-2 px-3 py-2.5 rounded-lg hover:bg-[#2f2f2f] transition-colors text-[#ececec]"
           >
             <Search className="w-4 h-4 text-[#b4b4b4]" />
             <span className="text-sm">Search chats</span>
           </button>
-          <Link
-            href="/quotations"
+          <button
+            type="button"
+            onClick={() => {
+              setSearchQuery('')
+              setShowSearchModal(true)
+            }}
             className="w-full flex items-center space-x-2 px-3 py-2.5 rounded-lg hover:bg-[#2f2f2f] transition-colors text-[#ececec]"
           >
             <BookOpen className="w-4 h-4 text-[#b4b4b4]" />
             <span className="text-sm">Library</span>
-          </Link>
+          </button>
           <Link
             href="/quotations"
             className="w-full flex items-center space-x-2 px-3 py-2.5 rounded-lg hover:bg-[#2f2f2f] transition-colors text-[#ececec]"
@@ -1075,6 +1304,15 @@ export default function ChatPage() {
             <FileText className="w-4 h-4 text-[#b4b4b4]" />
             <span className="text-sm">Quotations</span>
           </Link>
+          {user?.role === 'vendor' && (
+            <Link
+              href="/vendor"
+              className="flex items-center space-x-2 px-3 py-2.5 rounded-lg hover:bg-[#2f2f2f] transition-colors text-[#ececec]"
+            >
+              <Building2 className="w-4 h-4 text-[#b4b4b4]" />
+              <span className="text-sm">Vendor</span>
+            </Link>
+          )}
         </div>
 
         {/* Recent Chats */}
@@ -1104,11 +1342,13 @@ export default function ChatPage() {
             {(() => {
               const filteredSessions = searchQuery
                 ? sessions.filter((session) =>
-                    (session.title || `Chat ${session.id}`)
-                      .toLowerCase()
-                      .includes(searchQuery.toLowerCase())
+                    sessionLabel(session).toLowerCase().includes(searchQuery.toLowerCase())
                   )
                 : sessions
+
+              if (!authReady || sessionsLoading) {
+                return <p className="text-xs text-[#8e8e8e] px-3 py-2">Loading chats...</p>
+              }
 
               if (filteredSessions.length === 0) {
                 return (
@@ -1130,8 +1370,8 @@ export default function ChatPage() {
                   }`}
                 >
                   <p className="text-sm text-[#ececec] truncate flex items-center">
-                    <MessageSquare className="w-4 h-4 mr-2 text-[#b4b4b4]" />
-                    {session.title || `Chat ${session.id}`}
+                    <MessageSquare className="w-4 h-4 mr-2 text-[#b4b4b4] flex-shrink-0" />
+                    {sessionLabel(session)}
                   </p>
                 </button>
               ))
@@ -1176,13 +1416,15 @@ export default function ChatPage() {
             </div>
           ) : (
             <div className="flex flex-col w-full space-y-2">
-              <p className="text-xs text-[#b4b4b4]">
-                {remainingChats > 0 ? (
-                  <span>{remainingChats} chat{remainingChats !== 1 ? 's' : ''} remaining</span>
-                ) : (
-                  <span className="text-amber-400">Chat limit reached</span>
-                )}
-              </p>
+              {clientReady && (
+                <p className="text-xs text-[#b4b4b4]">
+                  {remainingChats > 0 ? (
+                    <span>{remainingChats} chat{remainingChats !== 1 ? 's' : ''} remaining</span>
+                  ) : (
+                    <span className="text-amber-400">Chat limit reached</span>
+                  )}
+                </p>
+              )}
               <div className="flex space-x-2">
                 <Link href="/login" className="flex-1">
                   <Button
@@ -1242,40 +1484,39 @@ export default function ChatPage() {
               />
             </div>
             <div className="max-h-96 overflow-y-auto p-2">
-              {searchQuery ? (
-                sessions.filter((session) =>
-                  (session.title || `Chat ${session.id}`)
-                    .toLowerCase()
-                    .includes(searchQuery.toLowerCase())
-                ).length > 0 ? (
-                  sessions
-                    .filter((session) =>
-                      (session.title || `Chat ${session.id}`)
-                        .toLowerCase()
-                        .includes(searchQuery.toLowerCase())
+              {(() => {
+                const matches = searchQuery
+                  ? sessions.filter((session) =>
+                      sessionLabel(session).toLowerCase().includes(searchQuery.toLowerCase())
                     )
-                    .map((session) => (
-                      <button
-                        key={session.id}
-                        onClick={() => {
-                          selectSession(session.id)
-                          setShowSearchModal(false)
-                          setSearchQuery('')
-                        }}
-                        className="w-full text-left px-3 py-2.5 rounded-lg hover:bg-[#3d3d3d] transition-colors mb-1 text-[#ececec]"
-                      >
-                        <p className="text-sm flex items-center">
-                          <MessageSquare className="w-4 h-4 mr-2 text-[#b4b4b4]" />
-                          {session.title || `Chat ${session.id}`}
-                        </p>
-                      </button>
-                    ))
-                ) : (
-                  <p className="text-sm text-[#8e8e8e] px-3 py-4 text-center">No chats found</p>
-                )
-              ) : (
-                <p className="text-sm text-[#8e8e8e] px-3 py-4 text-center">Start typing to search...</p>
-              )}
+                  : sessions
+                if (!authReady || sessionsLoading) {
+                  return <p className="text-sm text-[#8e8e8e] px-3 py-4 text-center">Loading chats...</p>
+                }
+                if (matches.length === 0) {
+                  return (
+                    <p className="text-sm text-[#8e8e8e] px-3 py-4 text-center">
+                      {searchQuery ? 'No chats found' : 'No chats yet. Start a new chat.'}
+                    </p>
+                  )
+                }
+                return matches.map((session) => (
+                  <button
+                    key={session.id}
+                    onClick={() => {
+                      selectSession(session.id)
+                      setShowSearchModal(false)
+                      setSearchQuery('')
+                    }}
+                    className="w-full text-left px-3 py-2.5 rounded-lg hover:bg-[#3d3d3d] transition-colors mb-1 text-[#ececec]"
+                  >
+                    <p className="text-sm flex items-center">
+                      <MessageSquare className="w-4 h-4 mr-2 text-[#b4b4b4] flex-shrink-0" />
+                      <span className="truncate">{sessionLabel(session)}</span>
+                    </p>
+                  </button>
+                ))
+              })()}
             </div>
             <div className="p-4 border-t border-[#2f2f2f]">
               <button
@@ -1300,57 +1541,6 @@ export default function ChatPage() {
             <Package className="w-5 h-5 text-primary-600" />
             <span className="font-semibold">ProcureX</span>
             <span className="text-[#8e8e8e] text-sm hidden sm:inline">v1</span>
-            {isAuthenticated && (
-              <div className="flex items-center space-x-2 ml-4">
-                {backendAvailable === false && (
-                  <span className="text-xs text-red-400 flex items-center mr-2" title="Backend server is not running">
-                    <div className="w-2 h-2 bg-red-400 rounded-full mr-1 animate-pulse"></div>
-                    Backend Offline
-                  </span>
-                )}
-                {isReconnecting ? (
-                  <span className="text-xs text-amber-400 flex items-center">
-                    <Loader2 className="w-3 h-3 mr-1 animate-spin" />
-                    Reconnecting...
-                  </span>
-                ) : wsConnected ? (
-                  <span className="text-xs text-green-400 flex items-center">
-                    <div className="w-2 h-2 bg-green-400 rounded-full mr-1"></div>
-                    Connected
-                  </span>
-                ) : (
-                  <div className="flex items-center space-x-2">
-                    <span className="text-xs text-red-400 flex items-center">
-                      <div className="w-2 h-2 bg-red-400 rounded-full mr-1"></div>
-                      Disconnected
-                    </span>
-                    {currentSession?.id && typeof currentSession.id === 'number' && (
-                      <button
-                        onClick={async () => {
-                          // Check backend first
-                          const backendHealthy = await checkBackendHealth()
-                          if (!backendHealthy) {
-                            showToast('Backend server is not running. Please start it with: cd backend && uvicorn app.main:app --reload', 'error')
-                            return
-                          }
-                          
-                          setIsReconnecting(true)
-                          const connected = await connectWebSocket(currentSession.id, 0, true)
-                          if (!connected) {
-                            setIsReconnecting(false)
-                            showToast('Failed to reconnect. Please check if the backend server is running.', 'error')
-                          }
-                        }}
-                        className="text-xs text-primary-600 hover:text-primary-700 underline"
-                        title="Reconnect WebSocket"
-                      >
-                        Reconnect
-                      </button>
-                    )}
-                  </div>
-                )}
-              </div>
-            )}
           </div>
           <div className="flex items-center space-x-3">
             {/* Internet Speed Test */}
@@ -1433,47 +1623,30 @@ export default function ChatPage() {
             <div className="flex items-center justify-center h-full">
               <div className="text-center max-w-2xl px-4">
                 <h1 className="text-4xl font-semibold text-white mb-4">ProcureX</h1>
-                {!isAuthenticated ? (
-                  <>
-                    <p className="text-[#b4b4b4] text-lg mb-4">I can help you know the price. Find the source. Close the deal.</p>
-                    <div className="bg-amber-900/20 border border-amber-700 rounded-lg p-4">
-                      <div className="flex items-start space-x-2">
-                        <Lock className="w-5 h-5 text-amber-400 mt-0.5" />
-                        <div className="text-left">
-                          <p className="text-amber-400 font-medium text-sm mb-1">Login Required for Pricing</p>
-                          <p className="text-[#b4b4b4] text-xs">To get product prices, availability, and create quotations, please login to your account.</p>
-                        </div>
-                      </div>
-                    </div>
-                  </>
-                ) : (
-                  <>
-                    <p className="text-[#b4b4b4] text-lg mb-8">Ask me about IT products, prices, and availability!</p>
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                      {[
-                        "What laptops do you have?",
-                        "Show me available phones",
-                        "Find products under $500",
-                        "What's in stock?"
-                      ].map((suggestion) => (
-                        <button
-                          key={suggestion}
-                          onClick={() => setInput(suggestion)}
-                          className="p-3 bg-[#2f2f2f] hover:bg-[#3d3d3d] rounded-lg text-[#ececec] text-left text-sm transition-colors"
-                        >
-                          {suggestion}
-                        </button>
-                      ))}
-                    </div>
-                  </>
-                )}
+                <p className="text-[#b4b4b4] text-lg mb-8">Ask me about IT products, prices, and availability!</p>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  {[
+                    "What laptops do you have?",
+                    "Show me available phones",
+                    "Find products under $500",
+                    "What's in stock?"
+                  ].map((suggestion) => (
+                    <button
+                      key={suggestion}
+                      onClick={() => void handleSend(suggestion)}
+                      className="p-3 bg-[#2f2f2f] hover:bg-[#3d3d3d] rounded-lg text-[#ececec] text-left text-sm transition-colors"
+                    >
+                      {suggestion}
+                    </button>
+                  ))}
+                </div>
               </div>
             </div>
           )}
           
           <div className="max-w-3xl mx-auto">
             {currentSession?.messages.map((message, index) => (
-              <ChatMessage key={index} message={message} />
+              <ChatMessage key={index} message={message} onSpeak={voice.speakNow} />
             ))}
             
             {isLoading && (
@@ -1491,7 +1664,7 @@ export default function ChatPage() {
               </div>
             )}
             
-            {productResults.length > 0 && isAuthenticated && (
+            {productResults.length > 0 && (currentSession?.messages?.length ?? 0) > 0 && (
               <div className="px-4 py-6 bg-transparent">
                 <div className="max-w-3xl mx-auto">
                   <h3 className="text-sm font-semibold text-[#ececec] mb-4">Available Products:</h3>
@@ -1499,27 +1672,6 @@ export default function ChatPage() {
                     {productResults.map((product) => (
                       <ProductCard key={product.id} product={product} />
                     ))}
-                  </div>
-                </div>
-              </div>
-            )}
-            
-            {productResults.length > 0 && !isAuthenticated && (
-              <div className="px-4 py-6 bg-transparent">
-                <div className="max-w-3xl mx-auto">
-                  <div className="bg-amber-900/20 border border-amber-700 rounded-lg p-4">
-                    <div className="flex items-start space-x-2">
-                      <Lock className="w-5 h-5 text-amber-400 mt-0.5" />
-                      <div>
-                        <p className="text-amber-400 font-medium text-sm mb-1">Login Required</p>
-                        <p className="text-[#b4b4b4] text-xs mb-3">Please login to view product prices and details.</p>
-                        <Link href="/login">
-                          <Button size="sm" className="bg-primary-600 hover:bg-primary-700 text-white">
-                            Login Now
-                          </Button>
-                        </Link>
-                      </div>
-                    </div>
                   </div>
                 </div>
               </div>
@@ -1532,20 +1684,58 @@ export default function ChatPage() {
         {/* Input - ChatGPT Style */}
         <div className="border-t border-[#2f2f2f] bg-[#212121] p-4">
           <div className="max-w-3xl mx-auto">
-            <div className="relative flex items-end bg-[#2f2f2f] rounded-2xl border border-transparent shadow-lg">
+            <div className={`relative flex items-end bg-[#2f2f2f] rounded-2xl border shadow-lg ${
+              voice.listening ? 'border-[#19C37D]' : 'border-transparent'
+            }`}>
+              {voice.supported && (
+                <button
+                  type="button"
+                  onClick={voice.toggleVoiceMode}
+                  disabled={isLoading}
+                  title={voice.voiceMode ? 'Stop voice chat' : 'Start voice chat'}
+                  className={`m-2 p-2 rounded-lg flex-shrink-0 transition-colors ${
+                    voice.voiceMode
+                      ? 'bg-[#19C37D] text-white'
+                      : 'text-[#8e8e8e] hover:bg-[#3d3d3d] hover:text-[#ececec]'
+                  }`}
+                >
+                  <AudioLines className="w-5 h-5" />
+                </button>
+              )}
               <textarea
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
                 onKeyPress={handleKeyPress}
-                placeholder="Message ProcureX..."
-                className="flex-1 resize-none bg-transparent text-[#ececec] placeholder-[#8e8e8e] px-4 py-3 focus:outline-none max-h-200px overflow-y-auto"
+                placeholder={
+                  voice.listening
+                    ? 'Listening...'
+                    : voice.speaking
+                      ? 'Speaking...'
+                      : 'Message ProcureX...'
+                }
+                className="flex-1 resize-none bg-transparent text-[#ececec] placeholder-[#8e8e8e] px-2 py-3 focus:outline-none max-h-200px overflow-y-auto"
                 rows={1}
                 disabled={isLoading}
                 style={{ maxHeight: '200px' }}
               />
+              {voice.supported && (
+                <button
+                  type="button"
+                  onClick={voice.toggleListening}
+                  disabled={isLoading || voice.speaking}
+                  title={voice.listening ? 'Stop listening' : 'Speak'}
+                  className={`m-2 p-2 rounded-lg flex-shrink-0 transition-colors ${
+                    voice.listening
+                      ? 'bg-red-600 text-white animate-pulse'
+                      : 'text-[#8e8e8e] hover:bg-[#3d3d3d] hover:text-[#ececec]'
+                  }`}
+                >
+                  {voice.listening ? <MicOff className="w-5 h-5" /> : <Mic className="w-5 h-5" />}
+                </button>
+              )}
               <button
-                onClick={handleSend}
-                disabled={isLoading || !input.trim()}
+                onClick={() => void handleSend()}
+                disabled={isLoading || !(input || '').trim()}
                 className="m-2 p-2 rounded-lg bg-primary-600 hover:bg-primary-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex-shrink-0"
               >
                 {isLoading ? (
@@ -1556,7 +1746,11 @@ export default function ChatPage() {
               </button>
             </div>
             <p className="text-xs text-[#8e8e8e] text-center mt-2">
-              AI can make mistakes. Check important info.
+              {voice.voiceMode
+                ? 'Voice chat on. Speak, then ProcureX will answer out loud.'
+                : voice.supported
+                  ? 'Tap the mic to talk, or the waveform for hands-free voice chat.'
+                  : 'AI can make mistakes. Check important info.'}
             </p>
           </div>
         </div>

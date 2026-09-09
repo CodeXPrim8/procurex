@@ -1,26 +1,41 @@
 import axios, { type InternalAxiosRequestConfig } from 'axios'
+import { getAccessToken } from './sessionToken'
 import { supabase } from './supabaseClient'
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
 
+export function apiErrorMessage(error: any, fallback = 'Something went wrong') {
+  const detail = error?.response?.data?.detail
+  if (typeof detail === 'string' && detail.trim()) return detail
+  if (Array.isArray(detail) && detail.length) {
+    return detail
+      .map((item: any) => item?.msg || item?.message || (typeof item === 'string' ? item : ''))
+      .filter(Boolean)
+      .join('\n')
+  }
+  if (error?.userMessage) return error.userMessage
+  if (error?.message) return error.message
+  return fallback
+}
+
 const api = axios.create({
   baseURL: `${API_URL}/api/v1`,
-  headers: {
-    'Content-Type': 'application/json',
-  },
 })
 
 // Add Supabase auth token to requests
 api.interceptors.request.use(async (config: InternalAxiosRequestConfig) => {
   try {
-    const { data, error } = await supabase.auth.getSession()
-    if (error) {
-      console.warn('Failed to get session for API request:', error)
-    }
-    const token = data?.session?.access_token
+    const token = await getAccessToken()
     if (token) {
       config.headers = config.headers || {}
       config.headers.Authorization = `Bearer ${token}`
+    }
+    if (typeof FormData !== 'undefined' && config.data instanceof FormData) {
+      if (typeof config.headers.delete === 'function') {
+        config.headers.delete('Content-Type')
+      } else {
+        delete (config.headers as Record<string, unknown>)['Content-Type']
+      }
     }
   } catch (error) {
     console.error('Error getting session token:', error)
@@ -149,7 +164,14 @@ export const authAPI = {
     email: string,
     password: string,
     fullName?: string,
-    role?: 'buyer' | 'vendor'
+    role?: 'buyer' | 'vendor',
+    vendorProfile?: {
+      company_name?: string
+      business_registration_number?: string
+      domain?: string
+      phone?: string
+      address?: string
+    }
   ) => {
     try {
       console.log('Supabase signUp called with:', { email, hasPassword: !!password, fullName, role })
@@ -160,6 +182,7 @@ export const authAPI = {
         data: {
           full_name: fullName,
           role,
+          ...(role === 'vendor' ? vendorProfile || {} : {}),
         },
           emailRedirectTo: typeof window !== 'undefined' ? `${window.location.origin}/login` : undefined,
       },
@@ -224,10 +247,10 @@ export const chatAPI = {
     return response.data
   },
 
-  createMessage: async (sessionId: number, content: string) => {
+  createMessage: async (sessionId: number, content: string, role: 'user' | 'assistant' = 'user') => {
     const response = await api.post(`/chat/sessions/${sessionId}/messages`, {
       content,
-      role: 'user',
+      role,
     })
     return response.data
   },
@@ -308,6 +331,34 @@ export const vendorsAPI = {
   createProduct: async (productData: any) => {
     const response = await api.post('/vendors/me/products/create', productData)
     return response.data
+  },
+
+  uploadProductImages: async (files: File[], productName: string, category: string) => {
+    if (!files.length) {
+      throw new Error('Upload at least one product photo.')
+    }
+    const token = await getAccessToken()
+    if (!token) {
+      throw new Error('Please log in again to upload product photos.')
+    }
+    const formData = new FormData()
+    files.forEach((file) => formData.append('files', file))
+    const response = await api.post('/vendors/me/products/images', formData, {
+      params: {
+        product_name: productName,
+        category,
+      },
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+      timeout: 180000,
+    })
+    return response.data as { urls: string[]; url: string; message?: string }
+  },
+
+  uploadProductImage: async (file: File, productName: string, category: string) => {
+    const payload = await vendorsAPI.uploadProductImages([file], productName, category)
+    return { url: payload.url || payload.urls?.[0], filename: undefined, message: payload.message }
   },
 
   updateProduct: async (vendorProductId: number, productData: any) => {

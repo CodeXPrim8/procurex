@@ -1,8 +1,8 @@
 import logging
 import asyncio
 from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect, HTTPException, status
-from sqlalchemy.orm import Session
-from typing import List
+from sqlalchemy.orm import Session, joinedload
+from typing import List, Optional
 from datetime import datetime
 import json
 from ..core.database import get_db
@@ -10,13 +10,31 @@ from ..api.dependencies import get_current_user, verify_supabase_token
 from ..models.user import User
 from ..models.chat import ChatSession, ChatMessage, MessageRole
 from ..models.product import Product, VendorProduct
-from ..schemas.chat import ChatMessageCreate, ChatMessageResponse, ChatSessionCreate, ChatSessionResponse
-from ..services.ai_service import generate_ai_response, parse_product_query
+from ..schemas.chat import (
+    ChatMessageCreate,
+    ChatMessageResponse,
+    ChatSessionCreate,
+    ChatSessionResponse,
+    ChatSessionSummary,
+)
+from ..services.ai_service import generate_ai_response, parse_product_query, is_catalog_query
+from ..services.chat_title import (
+    natural_chat_title,
+    should_replace_title,
+)
 from ..services.product_service import search_products
 from ..schemas.product import ProductSearch
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 logger = logging.getLogger(__name__)
+
+
+def _apply_natural_title(session: ChatSession, user_texts: List[str]) -> Optional[str]:
+    title = natural_chat_title(user_texts, session.title)
+    if title and should_replace_title(session.title, user_texts):
+        session.title = title
+        return title
+    return session.title
 
 
 @router.post("/sessions", response_model=ChatSessionResponse, status_code=201)
@@ -28,15 +46,22 @@ async def create_chat_session(
     """Create a new chat session."""
     session = ChatSession(
         user_id=current_user.id,
-        title=session_data.title
+        title=(session_data.title or "New chat").strip() or "New chat",
     )
     db.add(session)
     db.commit()
     db.refresh(session)
-    return session
+    return ChatSessionResponse(
+        id=session.id,
+        user_id=session.user_id,
+        title=session.title or "New chat",
+        created_at=session.created_at,
+        updated_at=session.updated_at,
+        messages=[],
+    )
 
 
-@router.get("/sessions", response_model=List[ChatSessionResponse])
+@router.get("/sessions", response_model=List[ChatSessionSummary])
 async def get_chat_sessions(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
@@ -45,6 +70,24 @@ async def get_chat_sessions(
     sessions = db.query(ChatSession).filter(
         ChatSession.user_id == current_user.id
     ).order_by(ChatSession.updated_at.desc()).all()
+
+    if sessions:
+        texts_by_session = {session.id: [] for session in sessions}
+        messages = db.query(ChatMessage).filter(
+            ChatMessage.session_id.in_([session.id for session in sessions]),
+            ChatMessage.role == MessageRole.USER,
+        ).order_by(ChatMessage.created_at.asc()).all()
+        for message in messages:
+            texts_by_session.setdefault(message.session_id, []).append(message.content)
+        changed = False
+        for session in sessions:
+            previous = session.title
+            _apply_natural_title(session, texts_by_session.get(session.id, []))
+            if session.title != previous:
+                changed = True
+        if changed:
+            db.commit()
+
     return sessions
 
 
@@ -55,14 +98,22 @@ async def get_chat_session(
     current_user: User = Depends(get_current_user)
 ):
     """Get a specific chat session with messages."""
-    session = db.query(ChatSession).filter(
+    session = db.query(ChatSession).options(
+        joinedload(ChatSession.messages)
+    ).filter(
         ChatSession.id == session_id,
         ChatSession.user_id == current_user.id
     ).first()
     if not session:
-        from fastapi import HTTPException
         raise HTTPException(status_code=404, detail="Chat session not found")
-    return session
+    return ChatSessionResponse(
+        id=session.id,
+        user_id=session.user_id,
+        title=session.title,
+        created_at=session.created_at,
+        updated_at=session.updated_at,
+        messages=[ChatMessageResponse.model_validate(message) for message in session.messages],
+    )
 
 
 @router.post("/sessions/{session_id}/messages", response_model=ChatMessageResponse)
@@ -81,21 +132,30 @@ async def create_message(
         from fastapi import HTTPException
         raise HTTPException(status_code=404, detail="Chat session not found")
     
+    user_texts = [
+        item.content
+        for item in db.query(ChatMessage).filter(
+            ChatMessage.session_id == session_id,
+            ChatMessage.role == MessageRole.USER,
+        ).order_by(ChatMessage.created_at.asc()).all()
+    ]
     message = ChatMessage(
         session_id=session_id,
         role=message_data.role,
         content=message_data.content,
-        metadata=message_data.metadata
+        message_metadata=message_data.metadata
     )
     db.add(message)
-    
-    # Update session timestamp
+
     session.updated_at = datetime.utcnow()
-    
+    if message_data.role == MessageRole.USER:
+        user_texts.append(message_data.content)
+    _apply_natural_title(session, user_texts)
+
     db.commit()
     db.refresh(message)
     logger.info("Stored message %s for session %s by user %s", message.id, session_id, current_user.email)
-    return message
+    return ChatMessageResponse.model_validate(message)
 
 
 @router.websocket("/ws/{session_id}")
@@ -204,56 +264,88 @@ async def websocket_chat(
                         content=user_message
                     )
                     db.add(user_msg)
+                    session.updated_at = datetime.utcnow()
+                    user_texts = [
+                        msg.get("content", "")
+                        for msg in context
+                        if msg.get("role") == "user"
+                    ]
+                    user_texts.append(user_message)
+                    _apply_natural_title(session, user_texts)
                     db.commit()
                     db.refresh(user_msg)
+                    try:
+                        await websocket.send_json({
+                            "type": "title",
+                            "title": session.title,
+                        })
+                    except Exception:
+                        pass
                 except Exception as e:
                     logger.error(f"Error saving user message: {e}")
                     # Continue even if saving fails
                 
-                # Start product search in background (non-blocking) using thread executor
+                # Search the catalog before answering so replies use real stock and prices.
                 product_results = []
-                product_search_task = None
-                
+
                 def search_products_sync():
-                    # Create a NEW database session for the thread to avoid connection leaks
                     thread_db = None
                     try:
                         thread_db = next(get_db())
                         parsed_query = parse_product_query(user_message)
-                        if parsed_query.get("category") != "unknown":
-                            search_query = ProductSearch(query=parsed_query.get("query", user_message))
-                            results = search_products(thread_db, search_query, limit=5)
-                            return results
+                        if not is_catalog_query(user_message, parsed_query):
+                            return []
+                        search_query = ProductSearch(
+                            query=parsed_query.get("query") or "",
+                            category=parsed_query.get("category"),
+                            max_price=parsed_query.get("max_price"),
+                            brand=parsed_query.get("brand"),
+                            in_stock_only=bool(parsed_query.get("in_stock_only")),
+                        )
+                        limit = 10 if parsed_query.get("in_stock_only") and not parsed_query.get("category") else 8
+                        return search_products(thread_db, search_query, limit=limit)
                     except Exception as e:
                         logger.warning(f"Error in product search: {e}")
                         return []
                     finally:
-                        # Always close the thread's database session
                         if thread_db:
                             try:
                                 thread_db.close()
                             except Exception as e:
                                 logger.warning(f"Error closing thread DB session: {e}")
-                
-                # Start product search in thread pool (non-blocking)
+
                 try:
                     loop = asyncio.get_running_loop()
-                    product_search_task = loop.run_in_executor(None, search_products_sync)
-                except RuntimeError:
-                    # Fallback if no event loop is running
-                    product_search_task = None
-                    product_results = []
-                
-                # Generate AI response with streaming (start immediately, don't wait for product search)
+                    product_results = await asyncio.wait_for(
+                        loop.run_in_executor(None, search_products_sync),
+                        timeout=3.0,
+                    ) or []
+                except Exception as e:
+                    logger.warning(f"Catalog search skipped: {e}")
+                    try:
+                        parsed_query = parse_product_query(user_message)
+                        if is_catalog_query(user_message, parsed_query):
+                            product_results = search_products(
+                                db,
+                                ProductSearch(
+                                    query=parsed_query.get("query") or "",
+                                    category=parsed_query.get("category"),
+                                    max_price=parsed_query.get("max_price"),
+                                    brand=parsed_query.get("brand"),
+                                    in_stock_only=bool(parsed_query.get("in_stock_only")),
+                                ),
+                                limit=8,
+                            )
+                    except Exception as search_error:
+                        logger.warning(f"Error in synchronous product search: {search_error}")
+                        product_results = []
+
                 assistant_response = ""
                 try:
                     chunk_count = 0
                     has_error = False
-                    
-                    # Start streaming immediately with empty product_results
-                    # Product results will be added later if available
                     try:
-                        for chunk in generate_ai_response(user_message, context, []):
+                        for chunk in generate_ai_response(user_message, context, product_results):
                             if chunk:  # Only process non-empty chunks
                                 assistant_response += chunk
                                 chunk_count += 1
@@ -266,27 +358,6 @@ async def websocket_chat(
                                     logger.error(f"Error sending chunk: {send_error}")
                                     has_error = True
                                     break
-                        
-                        # Wait for product search to complete (if still running, with timeout)
-                        if product_search_task:
-                            try:
-                                product_results = await asyncio.wait_for(product_search_task, timeout=1.5)
-                            except asyncio.TimeoutError:
-                                logger.warning("Product search timed out, continuing without results")
-                                product_results = []
-                            except Exception as e:
-                                logger.warning(f"Product search error: {e}")
-                                product_results = []
-                        else:
-                            # If task wasn't created, try synchronous search (fallback)
-                            try:
-                                parsed_query = parse_product_query(user_message)
-                                if parsed_query.get("category") != "unknown":
-                                    search_query = ProductSearch(query=parsed_query.get("query", user_message))
-                                    product_results = search_products(db, search_query, limit=5)
-                            except Exception as e:
-                                logger.warning(f"Error in synchronous product search: {e}")
-                                product_results = []
                     except StopIteration:
                         # Generator exhausted normally
                         pass
@@ -344,7 +415,7 @@ async def websocket_chat(
                         session_id=session_id,
                         role=MessageRole.ASSISTANT,
                         content=assistant_response,
-                        metadata=json.dumps({"product_results": product_results}) if product_results else None
+                        message_metadata=json.dumps({"product_results": product_results}) if product_results else None
                     )
                     db.add(assistant_msg)
                     session.updated_at = datetime.utcnow()
@@ -364,11 +435,21 @@ async def websocket_chat(
                 try:
                     await websocket.send_json({
                         "type": "done",
-                        "product_results": product_results
+                        "product_results": product_results,
+                        "title": session.title,
                     })
                 except Exception as e:
                     logger.error(f"Error sending done signal: {e}")
                     
+            except WebSocketDisconnect:
+                logger.info("WebSocket disconnected for session %s", session_id)
+                break
+            except RuntimeError as e:
+                if "disconnect" in str(e).lower():
+                    logger.info("WebSocket already disconnected for session %s", session_id)
+                    break
+                logger.exception("WebSocket runtime error for session %s: %s", session_id, e)
+                break
             except Exception as e:
                 logger.exception(f"Error processing message in WebSocket: {e}")
                 try:
@@ -376,8 +457,8 @@ async def websocket_chat(
                         "type": "error",
                         "error": "An error occurred while processing your message. Please try again."
                     })
-                except:
-                    pass
+                except Exception:
+                    break
                 continue
             
     except WebSocketDisconnect:

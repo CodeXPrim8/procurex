@@ -1,10 +1,12 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from .core.config import settings
-from .core.database import engine, Base
-from .api import auth, products, vendors, chat, quotations, admin
+from fastapi.staticfiles import StaticFiles
+from pathlib import Path
 import logging
 import time
+from .core.config import settings
+from .core.database import engine, Base, migrate_sqlite_schema
+from .api import auth, products, vendors, chat, quotations, admin
 
 # Configure logging
 logging.basicConfig(
@@ -15,6 +17,7 @@ logger = logging.getLogger(__name__)
 
 # Create database tables
 Base.metadata.create_all(bind=engine)
+migrate_sqlite_schema()
 
 app = FastAPI(
     title=settings.APP_NAME,
@@ -53,6 +56,10 @@ app.include_router(chat.router, prefix=settings.API_V1_PREFIX)
 app.include_router(quotations.router, prefix=settings.API_V1_PREFIX)
 app.include_router(admin.router, prefix=settings.API_V1_PREFIX)
 
+uploads_dir = Path("uploads")
+uploads_dir.mkdir(parents=True, exist_ok=True)
+app.mount("/uploads", StaticFiles(directory=str(uploads_dir)), name="uploads")
+
 
 @app.get("/")
 async def root():
@@ -65,16 +72,29 @@ async def health_check():
     try:
         # Test database connection
         from sqlalchemy import text
+        from urllib.parse import urlparse
+        import socket
         from .core.database import engine
         
         with engine.connect() as conn:
             result = conn.execute(text("SELECT 1"))
             result.fetchone()
+
+        supabase_host = urlparse(settings.SUPABASE_URL or "").hostname
+        supabase_dns = "unconfigured"
+        if supabase_host:
+            try:
+                socket.getaddrinfo(supabase_host, 443)
+                supabase_dns = "ok"
+            except OSError:
+                supabase_dns = "failed"
         
         return {
             "status": "healthy",
             "timestamp": time.time(),
             "database": "connected",
+            "supabase_host": supabase_host,
+            "supabase_dns": supabase_dns,
             "version": "1.0.0"
         }
     except Exception as e:

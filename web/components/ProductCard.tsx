@@ -5,6 +5,7 @@ import { Package, CheckCircle } from 'lucide-react'
 import Link from 'next/link'
 import Badge from './ui/Badge'
 import { formatPrice, getCurrencySymbol } from '@/lib/currency'
+import { resolveMediaUrl, productImageList } from '@/lib/media'
 
 interface ProductCardProps {
  product: {
@@ -16,6 +17,7 @@ interface ProductCardProps {
  stock: number
  specifications?: Record<string, any>
  image_url?: string
+ image_urls?: string[]
  available_vendors?: number
  }
 }
@@ -24,6 +26,7 @@ export default function ProductCard({ product }: ProductCardProps) {
  const [formattedPrice, setFormattedPrice] = useState('')
  const [currencySymbol, setCurrencySymbol] = useState('$')
  const isInStock = product.stock > 0
+ const coverImage = productImageList(product)[0]
 
  useEffect(() => {
  const loadPrice = async () => {
@@ -38,9 +41,9 @@ export default function ProductCard({ product }: ProductCardProps) {
  return (
  <Link href={`/products/${product.id}`} className="block h-full">
  <div className="group h-full flex flex-col rounded-2xl border border-[#2f2f2f] bg-[#2f2f2f] p-4 transition duration-200 hover:-translate-y-0.5 hover:border-[#3d3d3d] hover:bg-[#353535]">
- {product.image_url ? (
+ {coverImage ? (
  <img
- src={product.image_url}
+ src={resolveMediaUrl(coverImage)}
  alt={product.name}
  className="w-full h-40 object-cover rounded-xl mb-4 bg-[#171717]"
  />

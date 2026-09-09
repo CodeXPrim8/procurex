@@ -41,4 +41,41 @@ def get_db():
         db.close()
 
 
+def migrate_sqlite_schema() -> None:
+    """Add columns that create_all() will not add to an existing SQLite database."""
+    if not str(settings.DATABASE_URL).startswith("sqlite"):
+        return
+
+    from sqlalchemy import inspect, text
+
+    inspector = inspect(engine)
+    table_names = inspector.get_table_names()
+
+    with engine.begin() as connection:
+        if "vendors" in table_names:
+            existing = {column["name"] for column in inspector.get_columns("vendors")}
+            additions = {
+                "personal_name": "VARCHAR",
+                "id_type": "VARCHAR",
+                "id_number": "VARCHAR",
+                "id_document_url": "VARCHAR",
+                "business_address": "TEXT",
+                "address_verification_bill_url": "VARCHAR",
+                "company_certificate_url": "VARCHAR",
+                "verification_notes": "TEXT",
+                "phone": "VARCHAR",
+                "address": "TEXT",
+                "domain": "VARCHAR",
+                "business_registration_number": "VARCHAR",
+            }
+            for name, column_type in additions.items():
+                if name not in existing:
+                    connection.execute(text(f"ALTER TABLE vendors ADD COLUMN {name} {column_type}"))
+
+        if "products" in table_names:
+            existing_products = {column["name"] for column in inspector.get_columns("products")}
+            if "image_urls" not in existing_products:
+                connection.execute(text("ALTER TABLE products ADD COLUMN image_urls JSON"))
+
+
 

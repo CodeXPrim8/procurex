@@ -1,10 +1,14 @@
 'use client'
 
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { vendorsAPI, productAPI } from '@/lib/api'
-import { useRequireAuth } from '@/lib/auth'
+import { useRouter } from 'next/navigation'
+import { vendorsAPI, productAPI, apiErrorMessage } from '@/lib/api'
+import { persistVendorProfile, useRequireAuth } from '@/lib/auth'
+import { useStore } from '@/lib/store'
 import { showToast } from '@/lib/toast'
 import { runBackendDiagnostics } from '@/lib/backendTest'
+import { PRODUCT_CATEGORIES, specFieldsFor } from '@/lib/productCategories'
+import { resolveMediaUrl, productImageList, MAX_PRODUCT_IMAGES } from '@/lib/media'
 import Button from '@/components/ui/Button'
 import Input from '@/components/ui/Input'
 import Badge from '@/components/ui/Badge'
@@ -15,13 +19,14 @@ import {
  BarChart3, Settings, FileText, Eye, EyeOff, Save, Copy, MoreVertical,
  Grid3x3, List, Filter, Download, Share2, Info
 } from 'lucide-react'
-import Image from 'next/image'
 
 type ProductFormMode = 'create' | 'search' | null
 type ViewMode = 'grid' | 'list'
 
 export default function VendorDashboard() {
  const { user } = useRequireAuth()
+ const { setUser } = useStore()
+ const router = useRouter()
  const [vendor, setVendor] = useState<any>(null)
  const [products, setProducts] = useState<any[]>([])
  const [loading, setLoading] = useState(true)
@@ -48,6 +53,9 @@ export default function VendorDashboard() {
  price: 0,
  image_url: '',
  })
+ const [isCreatingProduct, setIsCreatingProduct] = useState(false)
+ const [productImageFiles, setProductImageFiles] = useState<File[]>([])
+ const [productImagePreviews, setProductImagePreviews] = useState<string[]>([])
  
  // Vendor registration state
  const [vendorFormData, setVendorFormData] = useState({
@@ -64,11 +72,15 @@ export default function VendorDashboard() {
 
  // Prevent multiple simultaneous loads
  const loadingRef = useRef(false)
+ const vendorRef = useRef<any>(null)
+ const userRef = useRef(user)
+ const profileSyncedRef = useRef(false)
  const fileInputRef = useRef<HTMLInputElement>(null)
+ userRef.current = user
 
  const checkPendingRegistration = useCallback(async () => {
  const pendingVendorData = localStorage.getItem('pending_vendor_registration')
- if (pendingVendorData) {
+ if (!pendingVendorData) return
  try {
  const vendorData = JSON.parse(pendingVendorData)
  setVendorFormData({
@@ -78,32 +90,94 @@ export default function VendorDashboard() {
  phone: vendorData.phone || '',
  address: vendorData.address || '',
  })
- setShowRegisterForm(true)
- showToast('Complete your vendor registration below', 'info')
  } catch (error) {
  console.error('Error parsing pending vendor data:', error)
  localStorage.removeItem('pending_vendor_registration')
- }
  }
  }, [])
 
  const loadVendorData = useCallback(async () => {
  if (loadingRef.current) return
- 
+
  loadingRef.current = true
- setLoading(true)
- 
+ const isFirstPaint = !vendorRef.current
+ if (isFirstPaint) setLoading(true)
+
  try {
  const vendorData = await vendorsAPI.getMyVendor()
+ vendorRef.current = vendorData
  setVendor(vendorData)
  localStorage.removeItem('pending_vendor_registration')
- 
+
+ if (!profileSyncedRef.current && userRef.current?.role !== 'vendor' && vendorData?.company_name) {
+ profileSyncedRef.current = true
+ void persistVendorProfile({ company_name: vendorData.company_name })
+ } else {
+ profileSyncedRef.current = true
+ }
+
  const vendorProducts = await vendorsAPI.getMyProducts()
  setProducts(vendorProducts || [])
  } catch (error: any) {
  console.error('Error loading vendor data:', error)
- if (error.response?.status === 404) {
- setVendor(null)
+ const pendingRaw = localStorage.getItem('pending_vendor_registration')
+ let pending: any = null
+ if (pendingRaw) {
+ try {
+ pending = JSON.parse(pendingRaw)
+ } catch {
+ localStorage.removeItem('pending_vendor_registration')
+ }
+ }
+ const pendingForThisUser = Boolean(
+ pending &&
+ (!pending.email || pending.email.toLowerCase() === (userRef.current?.email || '').toLowerCase())
+ )
+ if (!pendingForThisUser) {
+ setLoading(false)
+ loadingRef.current = false
+ if (userRef.current?.role !== 'vendor') {
+ router.replace('/chat')
+ }
+ return
+ }
+
+ const companyName = pending?.company_name || userRef.current?.full_name || 'My Company'
+ try {
+ const created = await vendorsAPI.register({
+ company_name: companyName,
+ business_registration_number: pending?.business_registration_number,
+ domain: pending?.domain,
+ phone: pending?.phone,
+ address: pending?.address,
+ })
+ vendorRef.current = created
+ setVendor(created)
+ if (!profileSyncedRef.current) {
+ profileSyncedRef.current = true
+ void persistVendorProfile({
+ company_name: created.company_name,
+ business_registration_number: created.business_registration_number,
+ domain: created.domain,
+ phone: created.phone,
+ address: created.address,
+ })
+ }
+ localStorage.removeItem('pending_vendor_registration')
+ try {
+ const vendorProducts = await vendorsAPI.getMyProducts()
+ setProducts(vendorProducts || [])
+ } catch {
+ setProducts([])
+ }
+ } catch (registerError) {
+ console.error('Auto vendor setup failed:', registerError)
+ const fallback = {
+ company_name: companyName,
+ verification_status: 'pending',
+ }
+ vendorRef.current = fallback
+ setVendor(fallback)
  setProducts([])
  }
  } finally {
@@ -113,11 +187,27 @@ export default function VendorDashboard() {
  }, [])
 
  useEffect(() => {
- if (user) {
+ if (!user?.id) return
+ const pendingRaw = localStorage.getItem('pending_vendor_registration')
+ let pending: any = null
+ if (pendingRaw) {
+ try {
+ pending = JSON.parse(pendingRaw)
+ } catch {
+ localStorage.removeItem('pending_vendor_registration')
+ }
+ }
+ const pendingForThisUser = Boolean(
+ pending &&
+ (!pending.email || pending.email.toLowerCase() === (user.email || '').toLowerCase())
+ )
+ if (user.role !== 'vendor' && !pendingForThisUser) {
+ router.replace('/chat')
+ return
+ }
  loadVendorData()
  checkPendingRegistration()
- }
- }, [user, loadVendorData, checkPendingRegistration])
+ }, [user?.id, user?.role, user?.email, loadVendorData, checkPendingRegistration, router])
 
  const handleSearchProducts = async () => {
  if (!productSearch.trim()) {
@@ -143,35 +233,136 @@ export default function VendorDashboard() {
  showToast('Please fill in all required fields (Name, SKU, Category)', 'error')
  return
  }
- 
+
  if (newProduct.price <= 0) {
  showToast('Price must be greater than 0', 'error')
  return
  }
 
+ const requiredSpecs = specFieldsFor(newProduct.category).filter((field) => field.required)
+ const missingSpec = requiredSpecs.find((field) => !String(newProduct.specifications[field.key] || '').trim())
+ if (missingSpec) {
+ showToast(`${missingSpec.label} is required for ${newProduct.category}s`, 'error')
+ return
+ }
+
+ if (!productImageFiles.length && !newProduct.image_url) {
+ showToast('Upload at least one clear photo of this product', 'error')
+ return
+ }
+
+ setIsCreatingProduct(true)
  try {
+ let imageUrls: string[] = newProduct.image_url ? [newProduct.image_url] : []
+ if (productImageFiles.length) {
+ const uploaded = await vendorsAPI.uploadProductImages(
+ productImageFiles,
+ newProduct.name.trim(),
+ newProduct.category
+ )
+ imageUrls = uploaded.urls || (uploaded.url ? [uploaded.url] : [])
+ }
+ const imageUrl = imageUrls[0]
+
+ const specifications = Object.fromEntries(
+ Object.entries(newProduct.specifications).filter(([, value]) => String(value || '').trim())
+ )
+
  await vendorsAPI.createProduct({
  product: {
- name: newProduct.name,
- sku: newProduct.sku,
+ name: newProduct.name.trim(),
+ sku: newProduct.sku.trim().toUpperCase(),
  category: newProduct.category,
- description: newProduct.description || undefined,
- specifications: Object.keys(newProduct.specifications).length > 0 
- ? newProduct.specifications 
- : undefined,
- image_url: newProduct.image_url || undefined,
+ description: newProduct.description.trim() || undefined,
+ specifications: Object.keys(specifications).length > 0 ? specifications : undefined,
+ image_url: imageUrl,
+ image_urls: imageUrls,
  },
  stock_quantity: newProduct.stock_quantity,
  price: Math.round(newProduct.price * 100),
  })
- 
+
  showToast('Product created successfully!', 'success')
  resetProductForm()
  setShowProductModal(false)
  loadVendorData()
  } catch (error: any) {
- showToast(error.response?.data?.detail || 'Failed to create product', 'error')
+ showToast(apiErrorMessage(error, 'Failed to create product'), 'error')
+ } finally {
+ setIsCreatingProduct(false)
  }
+ }
+
+ const probeImage = (file: File) =>
+ new Promise<{ ok: boolean; url: string }>((resolve) => {
+ const objectUrl = URL.createObjectURL(file)
+ const probe = new window.Image()
+ probe.onload = () => {
+ resolve({
+ ok: Math.min(probe.naturalWidth, probe.naturalHeight) >= 400,
+ url: objectUrl,
+ })
+ }
+ probe.onerror = () => {
+ URL.revokeObjectURL(objectUrl)
+ resolve({ ok: false, url: '' })
+ }
+ probe.src = objectUrl
+ })
+
+ const handleProductImagesSelected = async (incoming: File[]) => {
+ if (!incoming.length) return
+ const remaining = MAX_PRODUCT_IMAGES - productImageFiles.length
+ if (remaining <= 0) {
+ showToast(`You can upload up to ${MAX_PRODUCT_IMAGES} photos`, 'error')
+ return
+ }
+
+ const acceptedFiles: File[] = []
+ const acceptedPreviews: string[] = []
+ for (const file of incoming.slice(0, remaining)) {
+ if (!file.type.startsWith('image/')) {
+ showToast('Upload JPG, PNG, or WebP photos of the product', 'error')
+ continue
+ }
+ if (file.size > 8 * 1024 * 1024) {
+ showToast(`${file.name} is larger than 8MB`, 'error')
+ continue
+ }
+ const probed = await probeImage(file)
+ if (!probed.ok) {
+ showToast('Use a clear product photo at least 400px on the shortest side', 'error')
+ continue
+ }
+ acceptedFiles.push(file)
+ acceptedPreviews.push(probed.url)
+ }
+
+ if (incoming.length > remaining) {
+ showToast(`Only ${MAX_PRODUCT_IMAGES} photos are allowed. Extra files were skipped.`, 'info')
+ }
+
+ if (acceptedFiles.length) {
+ setProductImageFiles((prev) => [...prev, ...acceptedFiles])
+ setProductImagePreviews((prev) => [...prev, ...acceptedPreviews])
+ }
+ }
+
+ const removeProductImage = (index: number) => {
+ setProductImagePreviews((prev) => {
+ const url = prev[index]
+ if (url?.startsWith('blob:')) URL.revokeObjectURL(url)
+ return prev.filter((_, i) => i !== index)
+ })
+ setProductImageFiles((prev) => prev.filter((_, i) => i !== index))
+ }
+
+ const clearProductImages = () => {
+ productImagePreviews.forEach((url) => {
+ if (url.startsWith('blob:')) URL.revokeObjectURL(url)
+ })
+ setProductImageFiles([])
+ setProductImagePreviews([])
  }
 
  const handleAddExistingProduct = async (product: any) => {
@@ -269,8 +460,10 @@ export default function VendorDashboard() {
  showToast('Vendor information updated successfully!', 'success')
  } else {
  await vendorsAPI.register(vendorData)
- showToast('Vendor account created successfully!', 'success')
+ showToast('Welcome — your vendor dashboard is ready.', 'success')
  }
+ const vendorUser = await persistVendorProfile(vendorData)
+ if (vendorUser) setUser(vendorUser)
  localStorage.removeItem('pending_vendor_registration')
  setShowRegisterForm(false)
  setIsEditingVendor(false)
@@ -358,6 +551,7 @@ export default function VendorDashboard() {
  }
 
  const resetProductForm = () => {
+ clearProductImages()
  setNewProduct({
  name: '',
  sku: '',
@@ -415,7 +609,7 @@ export default function VendorDashboard() {
  )
  })
 
- if (loading) {
+ if (loading && !vendor) {
  return (
  <div className="min-h-screen flex items-center justify-center bg-[#212121]">
  <div className="text-center">
@@ -428,101 +622,10 @@ export default function VendorDashboard() {
 
  if (!vendor) {
  return (
- <div className="py-4">
- <div className="max-w-2xl mx-auto">
- <div className="bg-[#2f2f2f] rounded-2xl shadow-xl p-8">
- <div className="text-center mb-8">
- <div className="inline-flex items-center justify-center w-20 h-20 bg-[#171717] rounded-full mb-4">
- <Building2 className="w-10 h-10 text-primary-600" />
- </div>
- <h2 className="text-3xl font-bold text-[#ececec] mb-2">Become a Vendor</h2>
- <p className="text-[#b4b4b4]">Register your company to start selling products</p>
- </div>
-
- {!showRegisterForm ? (
+ <div className="min-h-screen flex items-center justify-center bg-[#212121]">
  <div className="text-center">
- <Button onClick={() => setShowRegisterForm(true)} size="lg" className="px-8">
- <Building2 className="w-5 h-5 mr-2" />
- Register as Vendor
- </Button>
- </div>
- ) : (
- <div className="space-y-6">
- <Input
- label="Company Name *"
- name="companyName"
- type="text"
- required
- value={vendorFormData.companyName}
- onChange={(e) => {
- setVendorFormData({ ...vendorFormData, companyName: e.target.value })
- if (vendorErrors.companyName) {
- setVendorErrors({ ...vendorErrors, companyName: '' })
- }
- }}
- error={vendorErrors.companyName}
- />
- <Input
- label="Business Registration Number"
- name="businessRegistrationNumber"
- type="text"
- value={vendorFormData.businessRegistrationNumber}
- onChange={(e) => setVendorFormData({ ...vendorFormData, businessRegistrationNumber: e.target.value })}
- placeholder="Optional"
- />
- <Input
- label="Domain/Website"
- name="domain"
- type="text"
- value={vendorFormData.domain}
- onChange={(e) => setVendorFormData({ ...vendorFormData, domain: e.target.value })}
- placeholder="Optional: yourcompany.com"
- />
- <Input
- label="Phone Number"
- name="phone"
- type="tel"
- value={vendorFormData.phone}
- onChange={(e) => setVendorFormData({ ...vendorFormData, phone: e.target.value })}
- placeholder="Optional"
- />
- <div>
- <label className="block text-sm font-medium text-[#b4b4b4] mb-1">
- Address
- </label>
- <textarea
- name="address"
- value={vendorFormData.address}
- onChange={(e) => setVendorFormData({ ...vendorFormData, address: e.target.value })}
- className="w-full px-4 py-2 border border-[#3d3d3d] rounded-lg focus:outline-none focus:ring-2 focus:ring-primary-500 resize-none"
- rows={3}
- placeholder="Optional: Company address"
- />
- </div>
- <div className="flex space-x-3 pt-4">
- <Button
- variant="outline"
- onClick={() => {
- setShowRegisterForm(false)
- setVendorFormData({
- companyName: '',
- businessRegistrationNumber: '',
- domain: '',
- phone: '',
- address: '',
- })
- setVendorErrors({})
- }}
- >
- Cancel
- </Button>
- <Button onClick={handleUpdateVendor} isLoading={isRegistering} className="flex-1">
- Register Vendor Account
- </Button>
- </div>
- </div>
- )}
- </div>
+ <div className="inline-block animate-spin rounded-full h-12 w-12 border-b-2 border-primary-600"></div>
+ <p className="mt-4 text-[#b4b4b4]">Opening your dashboard...</p>
  </div>
  </div>
  )
@@ -728,18 +831,28 @@ export default function VendorDashboard() {
  <div key={vp.id} className="bg-[#2f2f2f] rounded-xl border border-[#2f2f2f] hover:shadow-lg transition-all overflow-hidden group">
  {/* Product Image */}
  <div className="relative h-48 bg-[#2f2f2f] overflow-hidden">
- {vp.product?.image_url ? (
- <Image
- src={vp.product.image_url}
+ {(() => {
+ const photos = productImageList(vp.product)
+ const cover = photos[0]
+ return cover ? (
+ <>
+ <img
+ src={resolveMediaUrl(cover)}
  alt={vp.product.name}
- fill
- className="object-cover"
+ className="w-full h-full object-cover"
  />
+ {photos.length > 1 && (
+ <span className="absolute bottom-3 left-3 text-xs bg-black/70 text-white px-2 py-0.5 rounded-full">
+ {photos.length} photos
+ </span>
+ )}
+ </>
  ) : (
  <div className="flex items-center justify-center h-full">
  <ImageIcon className="w-16 h-16 text-gray-400" />
  </div>
- )}
+ )
+ })()}
  <div className="absolute top-3 right-3 flex space-x-2 opacity-0 group-hover:opacity-100 transition-opacity">
  <button
  onClick={() => openEditProductModal(vp)}
@@ -778,6 +891,15 @@ export default function VendorDashboard() {
  </Badge>
  )}
 
+ {vp.product?.specifications && Object.keys(vp.product.specifications).length > 0 && (
+ <p className="text-sm text-[#8e8e8e] mb-3">
+ {Object.entries(vp.product.specifications)
+ .slice(0, 3)
+ .map(([key, value]) => `${key.toUpperCase()}: ${value}`)
+ .join(' · ')}
+ </p>
+ )}
+
  {vp.product?.description && (
  <p className="text-sm text-[#b4b4b4] mb-4 line-clamp-2">
  {vp.product.description}
@@ -813,18 +935,20 @@ export default function VendorDashboard() {
  <div className="flex items-start gap-6">
  {/* Product Image */}
  <div className="relative w-24 h-24 bg-[#2f2f2f] rounded-lg overflow-hidden flex-shrink-0">
- {vp.product?.image_url ? (
- <Image
- src={vp.product.image_url}
+ {(() => {
+ const cover = productImageList(vp.product)[0]
+ return cover ? (
+ <img
+ src={resolveMediaUrl(cover)}
  alt={vp.product.name}
- fill
- className="object-cover"
+ className="w-full h-full object-cover"
  />
  ) : (
  <div className="flex items-center justify-center h-full">
  <ImageIcon className="w-8 h-8 text-gray-400" />
  </div>
- )}
+ )
+ })()}
  </div>
 
  {/* Product Details */}
@@ -936,7 +1060,7 @@ export default function VendorDashboard() {
  {isEditingVendor ? (
  <div className="space-y-6 bg-[#212121] p-6 rounded-lg">
  <Input
- label="Company Name *"
+ label="Company Name"
  name="companyName"
  type="text"
  required
@@ -979,7 +1103,7 @@ export default function VendorDashboard() {
  name="address"
  value={vendorFormData.address}
  onChange={(e) => setVendorFormData({ ...vendorFormData, address: e.target.value })}
- className="w-full px-4 py-2 border border-[#3d3d3d] rounded-lg focus:outline-none focus:ring-2 focus:ring-primary-500 resize-none"
+ className="w-full px-4 py-2 border border-[#3d3d3d] rounded-lg bg-[#2f2f2f] text-[#ececec] placeholder-[#8e8e8e] focus:outline-none focus:ring-2 focus:ring-primary-500 resize-none"
  rows={4}
  placeholder="Company address"
  />
@@ -1156,7 +1280,7 @@ export default function VendorDashboard() {
  ? 'Create New Product' 
  : 'Add Existing Product'
  }
- size="lg"
+ size="xl"
  footer={
  <div className="flex justify-end space-x-2">
  <Button variant="outline" onClick={() => {
@@ -1171,7 +1295,7 @@ export default function VendorDashboard() {
  Save Changes
  </Button>
  ) : productFormMode === 'create' ? (
- <Button onClick={handleCreateProduct}>
+ <Button onClick={handleCreateProduct} isLoading={isCreatingProduct}>
  <Plus className="w-4 h-4 mr-2" />
  Create Product
  </Button>
@@ -1211,18 +1335,18 @@ export default function VendorDashboard() {
  </div>
  ) : productFormMode === 'create' ? (
  <div className="space-y-6">
- <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
+ <div className="bg-[#171717] border border-[#3d3d3d] rounded-lg p-4">
  <div className="flex items-start">
- <Info className="w-5 h-5 text-blue-600 mr-2 mt-0.5" />
- <div className="text-sm text-blue-800">
- <p className="font-semibold mb-1">Create a new product</p>
- <p>Fill in the details below to add a new product to your catalog. Make sure all required fields are completed.</p>
+ <Info className="w-5 h-5 text-primary-500 mr-2 mt-0.5" />
+ <div className="text-sm text-[#b4b4b4]">
+ <p className="font-semibold mb-1 text-[#ececec]">Create a new product</p>
+ <p>Choose a category to fill the right specs, then upload a clear photo of this exact product.</p>
  </div>
  </div>
  </div>
 
  <Input
- label="Product Name *"
+ label="Product Name"
  type="text"
  required
  value={newProduct.name}
@@ -1231,7 +1355,7 @@ export default function VendorDashboard() {
  />
  <div className="grid grid-cols-2 gap-4">
  <Input
- label="SKU *"
+ label="SKU"
  type="text"
  required
  value={newProduct.sku}
@@ -1239,22 +1363,63 @@ export default function VendorDashboard() {
  placeholder="e.g., DELL-XPS15-001"
  helperText="Unique product identifier"
  />
- <Input
- label="Category *"
- type="text"
+ <div>
+ <label className="block text-sm font-medium text-[#b4b4b4] mb-1">
+ Category <span className="text-red-500">*</span>
+ </label>
+ <select
  required
  value={newProduct.category}
- onChange={(e) => setNewProduct({ ...newProduct, category: e.target.value })}
- placeholder="e.g., Laptops"
- />
+ onChange={(e) =>
+ setNewProduct({
+ ...newProduct,
+ category: e.target.value,
+ specifications: {},
+ })
+ }
+ className="w-full px-4 py-2 border border-[#3d3d3d] rounded-lg bg-[#2f2f2f] text-[#ececec] focus:outline-none focus:ring-2 focus:ring-primary-500"
+ >
+ <option value="">Select a category</option>
+ {PRODUCT_CATEGORIES.map((category) => (
+ <option key={category} value={category}>
+ {category}
+ </option>
+ ))}
+ </select>
  </div>
+ </div>
+
+ {specFieldsFor(newProduct.category).length > 0 && (
+ <div className="grid grid-cols-2 gap-4">
+ {specFieldsFor(newProduct.category).map((field) => (
+ <Input
+ key={field.key}
+ label={field.label}
+ type="text"
+ required={field.required}
+ value={newProduct.specifications[field.key] || ''}
+ onChange={(e) =>
+ setNewProduct({
+ ...newProduct,
+ specifications: {
+ ...newProduct.specifications,
+ [field.key]: e.target.value,
+ },
+ })
+ }
+ placeholder={field.placeholder}
+ />
+ ))}
+ </div>
+ )}
+
  <Input
  label="Description"
  type="textarea"
  className="min-h-[100px]"
  value={newProduct.description}
  onChange={(e) => setNewProduct({ ...newProduct, description: e.target.value })}
- placeholder="Detailed product description..."
+ placeholder="Extra details buyers should know..."
  />
  <div className="grid grid-cols-2 gap-4">
  <Input
@@ -1267,7 +1432,7 @@ export default function VendorDashboard() {
  }
  />
  <Input
- label="Price (USD) *"
+ label="Price (USD)"
  type="number"
  min="0"
  step="0.01"
@@ -1281,30 +1446,60 @@ export default function VendorDashboard() {
  </div>
  <div>
  <label className="block text-sm font-medium text-[#b4b4b4] mb-2">
- Product Image URL (Optional)
+ Product photos <span className="text-red-500">*</span>
  </label>
- <div className="flex items-center space-x-2">
- <Input
- type="url"
- value={newProduct.image_url}
- onChange={(e) => setNewProduct({ ...newProduct, image_url: e.target.value })}
- placeholder="https://example.com/image.jpg"
- />
- {newProduct.image_url && (
- <div className="relative w-16 h-16 rounded-lg overflow-hidden border border-[#3d3d3d]">
- <Image
- src={newProduct.image_url}
- alt="Preview"
- fill
- className="object-cover"
- onError={() => {
- showToast('Invalid image URL', 'error')
- setNewProduct({ ...newProduct, image_url: '' })
+ <p className="text-xs text-[#8e8e8e] mb-3">
+ Upload 1–{MAX_PRODUCT_IMAGES} sharp photos of this product (JPG, PNG, or WebP, at least 400px). Show the actual item from different angles. Screenshots and unrelated pictures will be rejected.
+ </p>
+ <input
+ ref={fileInputRef}
+ type="file"
+ accept="image/jpeg,image/png,image/webp"
+ multiple
+ className="hidden"
+ onChange={(e) => {
+ const selected = Array.from(e.target.files || [])
+ void handleProductImagesSelected(selected)
+ e.target.value = ''
  }}
  />
+ <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+ {productImagePreviews.map((preview, index) => (
+ <div key={`${preview}-${index}`} className="relative group">
+ <img
+ src={preview}
+ alt={`Product photo ${index + 1}`}
+ className="w-full h-28 object-cover rounded-lg border border-[#3d3d3d] bg-[#171717]"
+ />
+ {index === 0 && (
+ <span className="absolute left-2 top-2 text-[10px] font-semibold uppercase tracking-wide bg-black/70 text-white px-1.5 py-0.5 rounded">
+ Cover
+ </span>
+ )}
+ <button
+ type="button"
+ onClick={() => removeProductImage(index)}
+ className="absolute right-2 top-2 p-1 rounded-full bg-black/70 text-white opacity-0 group-hover:opacity-100 transition-opacity"
+ aria-label="Remove photo"
+ >
+ <X className="w-3.5 h-3.5" />
+ </button>
  </div>
+ ))}
+ {productImageFiles.length < MAX_PRODUCT_IMAGES && (
+ <button
+ type="button"
+ onClick={() => fileInputRef.current?.click()}
+ className="flex flex-col items-center justify-center h-28 rounded-lg border-2 border-dashed border-[#3d3d3d] bg-[#171717] text-[#b4b4b4] hover:border-primary-500 hover:text-[#ececec] transition-colors"
+ >
+ <Upload className="w-6 h-6 mb-1" />
+ <span className="text-xs">{productImageFiles.length ? 'Add more' : 'Upload photos'}</span>
+ </button>
  )}
  </div>
+ <p className="text-xs text-[#8e8e8e] mt-2">
+ {productImageFiles.length}/{MAX_PRODUCT_IMAGES} photos
+ </p>
  </div>
  </div>
  ) : (

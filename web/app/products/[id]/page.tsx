@@ -9,6 +9,7 @@ import Button from '@/components/ui/Button'
 import Badge from '@/components/ui/Badge'
 import { useRequireAuth } from '@/lib/auth'
 import { formatPrice, getCurrencySymbol } from '@/lib/currency'
+import { resolveMediaUrl, productImageList } from '@/lib/media'
 
 // Helper component for alternative products
 function AlternativeProductCard({ product, onSelect }: { product: any, onSelect: () => void }) {
@@ -44,6 +45,7 @@ export default function ProductDetailPage() {
  const [quantity, setQuantity] = useState(1)
  const [formattedPrice, setFormattedPrice] = useState('')
  const [currencySymbol, setCurrencySymbol] = useState('$')
+ const [activeImage, setActiveImage] = useState(0)
 
  useEffect(() => {
  if (params.id) {
@@ -55,6 +57,7 @@ export default function ProductDetailPage() {
  try {
  const productData = await productAPI.getProduct(Number(params.id))
  setProduct(productData)
+ setActiveImage(0)
  
  // Format price based on location
  const price = await formatPrice(productData.price || 0)
@@ -120,6 +123,8 @@ export default function ProductDetailPage() {
  }
 
  const isInStock = product.stock > 0
+ const photos = productImageList(product)
+ const currentPhoto = photos[activeImage] || photos[0]
 
  return (
  <div className="space-y-6">
@@ -133,17 +138,33 @@ export default function ProductDetailPage() {
  </Button>
 
  <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
- {/* Product Image */}
+ {/* Product Images */}
  <div>
- {product.image_url ? (
+ {currentPhoto ? (
  <img
- src={product.image_url}
+ src={resolveMediaUrl(currentPhoto)}
  alt={product.name}
- className="w-full h-96 object-cover rounded-lg"
+ className="w-full h-96 object-cover rounded-lg bg-[#171717]"
  />
  ) : (
  <div className="w-full h-96 bg-[#2f2f2f] rounded-lg flex items-center justify-center">
  <Package className="w-24 h-24 text-gray-400" />
+ </div>
+ )}
+ {photos.length > 1 && (
+ <div className="mt-3 grid grid-cols-5 gap-2">
+ {photos.map((url, index) => (
+ <button
+ key={`${url}-${index}`}
+ type="button"
+ onClick={() => setActiveImage(index)}
+ className={`h-16 rounded-md overflow-hidden border ${
+ index === activeImage ? 'border-primary-500' : 'border-[#3d3d3d]'
+ }`}
+ >
+ <img src={resolveMediaUrl(url)} alt="" className="w-full h-full object-cover" />
+ </button>
+ ))}
  </div>
  )}
  </div>

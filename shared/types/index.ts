@@ -18,6 +18,7 @@ export interface Product {
   specifications?: Record<string, any>
   base_price?: number
   image_url?: string
+  image_urls?: string[]
   created_at: string
   updated_at: string
 }

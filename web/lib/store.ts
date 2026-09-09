@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import { supabase } from './supabaseClient'
+import { rememberAccessToken } from './sessionToken'
 
 export interface StoreUser {
   id: string
@@ -40,25 +41,45 @@ export const useStore = create<AppState>((set) => ({
   isAuthenticated: false,
   authReady: false,
   
-  setUser: (user) => set({ user, isAuthenticated: !!user }),
+  setUser: (user) => set((state) => {
+    const prev = state.user
+    if (prev === user) return state
+    if (
+      prev &&
+      user &&
+      prev.id === user.id &&
+      prev.email === user.email &&
+      prev.role === user.role &&
+      prev.full_name === user.full_name
+    ) {
+      return state
+    }
+    if (!prev && !user) return state
+    return { user, isAuthenticated: !!user }
+  }),
   setAuthReady: (ready) => set({ authReady: ready }),
   
-  setCurrentSession: (session) => set({ currentSession: session }),
+  setCurrentSession: (session) => set({
+    currentSession: session
+      ? { ...session, messages: session.messages || [] }
+      : null,
+  }),
   
   addMessage: (message) => set((state) => {
     if (!state.currentSession) return state
     return {
       currentSession: {
         ...state.currentSession,
-        messages: [...state.currentSession.messages, message],
+        messages: [...(state.currentSession.messages || []), message],
       },
     }
   }),
   
   setMessages: (messages) => set((state) => {
     if (!state.currentSession) return state
+    const existing = state.currentSession.messages || []
     const newMessages = typeof messages === 'function' 
-      ? messages(state.currentSession.messages)
+      ? messages(existing)
       : messages
     return {
       currentSession: {
@@ -69,6 +90,7 @@ export const useStore = create<AppState>((set) => ({
   }),
   
   logout: async () => {
+    rememberAccessToken(null)
     await supabase.auth.signOut()
     set({ user: null, currentSession: null, isAuthenticated: false })
   },
