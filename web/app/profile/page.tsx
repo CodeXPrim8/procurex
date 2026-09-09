@@ -20,15 +20,15 @@ export default function ProfilePage() {
 
  return (
  <div className="max-w-4xl mx-auto">
- <h1 className="text-3xl font-bold text-[#ececec] mb-8">Profile</h1>
+ <h1 className="text-2xl sm:text-3xl font-bold text-[#ececec] mb-6 sm:mb-8">Profile</h1>
  
- <div className="bg-[#2f2f2f] rounded-lg shadow p-6 space-y-6">
+ <div className="bg-[#2f2f2f] rounded-lg shadow p-4 sm:p-6 space-y-6">
  <div className="flex items-center space-x-4">
  <div className="w-16 h-16 bg-[#171717] rounded-full flex items-center justify-center">
  <User className="w-8 h-8 text-primary-600" />
  </div>
  <div>
- <h2 className="text-2xl font-semibold text-[#ececec]">
+ <h2 className="text-xl sm:text-2xl font-semibold text-[#ececec] break-words">
  {user.full_name || 'User'}
  </h2>
  <p className="text-[#b4b4b4]">{user.role}</p>
@@ -40,7 +40,7 @@ export default function ProfilePage() {
  <Mail className="w-5 h-5 text-gray-400" />
  <div>
  <p className="text-sm text-[#8e8e8e]">Email</p>
- <p className="text-[#ececec]">{user.email}</p>
+ <p className="text-[#ececec] break-all">{user.email}</p>
  </div>
  </div>
 

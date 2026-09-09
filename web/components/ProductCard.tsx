@@ -40,15 +40,17 @@ export default function ProductCard({ product }: ProductCardProps) {
 
  return (
  <Link href={`/products/${product.id}`} className="block h-full">
- <div className="group h-full flex flex-col rounded-2xl border border-[#2f2f2f] bg-[#2f2f2f] p-4 transition duration-200 hover:-translate-y-0.5 hover:border-[#3d3d3d] hover:bg-[#353535]">
+ <div className="group h-full flex flex-col rounded-2xl border border-[#2f2f2f] bg-[#2f2f2f] p-3 sm:p-4 transition duration-200 hover:-translate-y-0.5 hover:border-[#3d3d3d] hover:bg-[#353535]">
  {coverImage ? (
  <img
  src={resolveMediaUrl(coverImage)}
  alt={product.name}
- className="w-full h-40 object-cover rounded-xl mb-4 bg-[#171717]"
+ loading="lazy"
+ decoding="async"
+ className="w-full h-36 sm:h-40 object-cover rounded-xl mb-3 sm:mb-4 bg-[#171717]"
  />
  ) : (
- <div className="w-full h-40 rounded-xl mb-4 flex items-center justify-center bg-[#171717]">
+ <div className="w-full h-36 sm:h-40 rounded-xl mb-3 sm:mb-4 flex items-center justify-center bg-[#171717]">
  <Package className="w-10 h-10 text-[#19C37D]" />
  </div>
  )}

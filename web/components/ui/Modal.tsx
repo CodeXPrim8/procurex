@@ -42,13 +42,13 @@ export default function Modal({
 
  return (
  <div className="fixed inset-0 z-50 overflow-y-auto">
- <div className="flex items-center justify-center min-h-screen px-4 pt-4 pb-20 text-center sm:block sm:p-0">
+ <div className="flex items-end sm:items-center justify-center min-h-dvh px-0 sm:px-4 pt-4 pb-0 sm:pb-20 text-center">
  <div
  className="fixed inset-0 transition-opacity bg-black bg-opacity-70"
  onClick={onClose}
  />
  
- <div className={`inline-block align-bottom bg-[#2f2f2f] rounded-lg text-left overflow-hidden shadow-xl transform transition-all sm:my-8 sm:align-middle sm:w-full border border-[#3d3d3d] ${sizes[size]}`}>
+ <div className={`relative w-full inline-block align-bottom bg-[#2f2f2f] rounded-t-2xl sm:rounded-lg text-left shadow-xl transform transition-all sm:my-8 sm:align-middle max-h-[92dvh] overflow-y-auto overflow-x-hidden border border-[#3d3d3d] ${sizes[size]}`}>
  <div className="bg-[#2f2f2f] px-4 pt-5 pb-4 sm:p-6">
  {title && (
  <div className="flex items-center justify-between mb-4">
@@ -72,7 +72,7 @@ export default function Modal({
  <div className="text-[#ececec]">{children}</div>
  </div>
  {footer && (
- <div className="bg-[#171717] px-4 py-3 sm:px-6 sm:flex sm:flex-row-reverse border-t border-[#3d3d3d]">
+ <div className="bg-[#171717] px-4 py-3 sm:px-6 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end border-t border-[#3d3d3d] pb-[max(0.75rem,env(safe-area-inset-bottom))]">
  {footer}
  </div>
  )}

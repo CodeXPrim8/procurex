@@ -144,10 +144,10 @@ export default function ProductDetailPage() {
  <img
  src={resolveMediaUrl(currentPhoto)}
  alt={product.name}
- className="w-full h-96 object-cover rounded-lg bg-[#171717]"
+ className="w-full h-56 sm:h-80 lg:h-96 object-cover rounded-lg bg-[#171717]"
  />
  ) : (
- <div className="w-full h-96 bg-[#2f2f2f] rounded-lg flex items-center justify-center">
+ <div className="w-full h-56 sm:h-80 lg:h-96 bg-[#2f2f2f] rounded-lg flex items-center justify-center">
  <Package className="w-24 h-24 text-gray-400" />
  </div>
  )}
@@ -172,8 +172,8 @@ export default function ProductDetailPage() {
  {/* Product Info */}
  <div className="space-y-6">
  <div>
- <div className="flex items-start justify-between mb-2">
- <h1 className="text-3xl font-bold text-[#ececec]">{product.name}</h1>
+ <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-2 mb-2">
+ <h1 className="text-2xl sm:text-3xl font-bold text-[#ececec] break-words">{product.name}</h1>
  <Badge variant={isInStock ? 'success' : 'warning'}>
  {isInStock ? 'In Stock' : 'Out of Stock'}
  </Badge>

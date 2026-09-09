@@ -20,7 +20,9 @@ import {
   Building2,
   Mic,
   MicOff,
-  AudioLines
+  AudioLines,
+  Menu,
+  X,
 } from 'lucide-react'
 import Link from 'next/link'
 import Image from 'next/image'
@@ -35,7 +37,6 @@ import { showToast } from '@/lib/toast'
 import { getAccessToken } from '@/lib/sessionToken'
 import { naturalChatTitle } from '@/lib/chatTitle'
 import { formatPriceRange, getCurrencySymbol } from '@/lib/currency'
-import SpeedTest from '@/components/SpeedTest'
 import { useVoiceChat } from '@/lib/useVoiceChat'
 
 const LAST_CHAT_KEY = 'procurex_last_chat_id'
@@ -117,7 +118,7 @@ export default function ChatPage() {
   const [input, setInput] = useState('')
   const [isLoading, setIsLoading] = useState(false)
   const [productResults, setProductResults] = useState<any[]>([])
-  const [showSidebar, setShowSidebar] = useState(true)
+  const [showSidebar, setShowSidebar] = useState(false)
   const [showUserMenu, setShowUserMenu] = useState(false)
   const [showUserMenuHeader, setShowUserMenuHeader] = useState(false)
   const [wsConnected, setWsConnected] = useState(false)
@@ -497,6 +498,7 @@ export default function ChatPage() {
 
   const createNewSession = async () => {
     if (!authReady) return
+    setShowSidebar(false)
 
     const blankInSidebar =
       isBlankChat(currentSession) &&
@@ -557,6 +559,7 @@ export default function ChatPage() {
   }
 
   const selectSession = async (sessionId: number) => {
+    setShowSidebar(false)
     rememberChat(sessionId)
     if (!isAuthenticated || !isServerSession(sessionId)) {
       const localSessions = localStorage.getItem('temp_chat_sessions')
@@ -1207,6 +1210,25 @@ export default function ChatPage() {
     }
   }, [showUserMenu, showUserMenuHeader])
 
+  useEffect(() => {
+    if (!showSidebar) return
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setShowSidebar(false)
+    }
+    const media = window.matchMedia('(max-width: 767px)')
+    const syncOverflow = () => {
+      document.body.style.overflow = media.matches ? 'hidden' : ''
+    }
+    syncOverflow()
+    media.addEventListener('change', syncOverflow)
+    document.addEventListener('keydown', onKey)
+    return () => {
+      media.removeEventListener('change', syncOverflow)
+      document.removeEventListener('keydown', onKey)
+      document.body.style.overflow = ''
+    }
+  }, [showSidebar])
+
   // Guest chat limit — count localStorage only after mount to avoid hydration mismatch
   const chatLimit = 5
   const localSessionsCount = clientReady && !isAuthenticated
@@ -1223,9 +1245,29 @@ export default function ChatPage() {
   const hasReachedLimit = clientReady && !isAuthenticated && localSessionsCount >= chatLimit
 
   return (
-    <div className="fixed inset-0 top-0 flex bg-[#212121] overflow-hidden">
+    <div className="fixed inset-0 h-dvh max-h-dvh bg-[#212121] overflow-hidden md:flex">
+      {showSidebar && (
+        <button
+          type="button"
+          aria-label="Close menu"
+          className="md:hidden fixed inset-0 z-40 bg-black/50"
+          onClick={() => setShowSidebar(false)}
+        />
+      )}
+
       {/* Sidebar - Navigation & Chat History (ChatGPT style) */}
-      <div className={`${showSidebar ? 'w-64' : 'w-0'} hidden md:flex md:flex-col h-full bg-[#171717] border-r border-[#2f2f2f] transition-all duration-300 overflow-hidden relative`}>
+      <div className={`flex flex-col h-full bg-[#171717] border-r border-[#2f2f2f] overflow-hidden z-50 w-72 max-w-[85vw] fixed inset-y-0 left-0 md:relative md:max-w-none md:w-64 md:flex-shrink-0 transition-transform duration-300 ${showSidebar ? 'translate-x-0' : '-translate-x-full max-md:pointer-events-none'} md:translate-x-0`}>
+        <div className="md:hidden flex items-center justify-between p-3 border-b border-[#2f2f2f]">
+          <span className="font-semibold text-[#ececec]">Menu</span>
+          <button
+            type="button"
+            onClick={() => setShowSidebar(false)}
+            className="min-h-11 min-w-11 inline-flex items-center justify-center rounded-lg text-[#ececec] hover:bg-[#2f2f2f]"
+            aria-label="Close menu"
+          >
+            <X className="w-5 h-5" />
+          </button>
+        </div>
         {/* New Chat Button */}
           <div className="p-3 border-b border-[#2f2f2f]">
           <Button
@@ -1251,6 +1293,7 @@ export default function ChatPage() {
           <button 
             onClick={() => {
               setSearchQuery('')
+              setShowSidebar(false)
               setShowSearchModal(true)
             }}
             className="w-full flex items-center space-x-2 px-3 py-2.5 rounded-lg hover:bg-[#2f2f2f] transition-colors text-[#ececec]"
@@ -1262,6 +1305,7 @@ export default function ChatPage() {
             type="button"
             onClick={() => {
               setSearchQuery('')
+              setShowSidebar(false)
               setShowSearchModal(true)
             }}
             className="w-full flex items-center space-x-2 px-3 py-2.5 rounded-lg hover:bg-[#2f2f2f] transition-colors text-[#ececec]"
@@ -1271,6 +1315,7 @@ export default function ChatPage() {
           </button>
           <Link
             href="/quotations"
+            onClick={() => setShowSidebar(false)}
             className="w-full flex items-center space-x-2 px-3 py-2.5 rounded-lg hover:bg-[#2f2f2f] transition-colors text-[#ececec]"
           >
             <Folder className="w-4 h-4 text-[#b4b4b4]" />
@@ -1285,6 +1330,7 @@ export default function ChatPage() {
             href="https://www.bison.ng"
             target="_blank"
             rel="noopener noreferrer"
+            onClick={() => setShowSidebar(false)}
             className="flex items-center space-x-2 px-3 py-2.5 rounded-lg hover:bg-[#2f2f2f] transition-colors text-[#ececec]"
           >
             <Image src="/images/bisonbooks.svg" alt="BisonBooks" width={20} height={20} />
@@ -1292,6 +1338,7 @@ export default function ChatPage() {
           </Link>
           <Link
             href="/products"
+            onClick={() => setShowSidebar(false)}
             className="flex items-center space-x-2 px-3 py-2.5 rounded-lg hover:bg-[#2f2f2f] transition-colors text-[#ececec]"
           >
             <ShoppingCart className="w-4 h-4 text-[#b4b4b4]" />
@@ -1299,6 +1346,7 @@ export default function ChatPage() {
           </Link>
           <Link
             href="/quotations"
+            onClick={() => setShowSidebar(false)}
             className="flex items-center space-x-2 px-3 py-2.5 rounded-lg hover:bg-[#2f2f2f] transition-colors text-[#ececec]"
           >
             <FileText className="w-4 h-4 text-[#b4b4b4]" />
@@ -1307,6 +1355,7 @@ export default function ChatPage() {
           {user?.role === 'vendor' && (
             <Link
               href="/vendor"
+              onClick={() => setShowSidebar(false)}
               className="flex items-center space-x-2 px-3 py-2.5 rounded-lg hover:bg-[#2f2f2f] transition-colors text-[#ececec]"
             >
               <Building2 className="w-4 h-4 text-[#b4b4b4]" />
@@ -1453,14 +1502,14 @@ export default function ChatPage() {
       {/* Search Modal */}
       {showSearchModal && (
         <div 
-          className="fixed inset-0 bg-black bg-opacity-50 z-50 flex items-start justify-center pt-20"
+          className="fixed inset-0 bg-black bg-opacity-50 z-[60] flex items-start justify-center pt-[12vh] px-3"
           onClick={() => {
             setShowSearchModal(false)
             setSearchQuery('')
           }}
         >
           <div 
-            className="bg-[#2f2f2f] border border-[#2f2f2f] rounded-lg w-full max-w-md mx-4 shadow-xl"
+            className="bg-[#2f2f2f] border border-[#2f2f2f] rounded-lg w-full max-w-md mx-0 shadow-xl max-h-[80dvh] flex flex-col"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="p-4 border-b border-[#2f2f2f]">
@@ -1483,7 +1532,7 @@ export default function ChatPage() {
                 }}
               />
             </div>
-            <div className="max-h-96 overflow-y-auto p-2">
+            <div className="max-h-[50vh] overflow-y-auto p-2">
               {(() => {
                 const matches = searchQuery
                   ? sessions.filter((session) =>
@@ -1534,31 +1583,45 @@ export default function ChatPage() {
       )}
 
       {/* Main Chat Area - ChatGPT Style */}
-      <div className="flex-1 flex flex-col bg-[#212121]">
+      <div className="flex-1 flex flex-col bg-[#212121] min-w-0 min-h-0 h-full w-full">
         {/* Top Header */}
-        <div className="bg-[#171717] border-b border-[#2f2f2f] px-4 sm:px-6 py-3 flex items-center justify-between">
-          <div className="flex items-center space-x-2 text-[#ececec]">
-            <Package className="w-5 h-5 text-primary-600" />
-            <span className="font-semibold">ProcureX</span>
+        <div className="bg-[#171717] border-b border-[#2f2f2f] px-2 sm:px-4 py-2 sm:py-3 flex items-center justify-between gap-2 shrink-0">
+          <div className="flex items-center min-w-0 space-x-1 sm:space-x-2 text-[#ececec]">
+            <button
+              type="button"
+              onClick={() => setShowSidebar(true)}
+              className="md:hidden min-h-11 min-w-11 inline-flex items-center justify-center rounded-lg hover:bg-[#2f2f2f]"
+              aria-label="Open menu"
+            >
+              <Menu className="w-5 h-5" />
+            </button>
+            <Package className="w-5 h-5 text-primary-600 flex-shrink-0" />
+            <span className="font-semibold truncate">ProcureX</span>
             <span className="text-[#8e8e8e] text-sm hidden sm:inline">v1</span>
           </div>
-          <div className="flex items-center space-x-3">
-            {/* Internet Speed Test */}
-            <SpeedTest />
+          <div className="flex items-center space-x-1 sm:space-x-3">
+            <button
+              type="button"
+              onClick={() => void createNewSession()}
+              className="md:hidden min-h-11 min-w-11 inline-flex items-center justify-center rounded-lg text-[#ececec] hover:bg-[#2f2f2f]"
+              aria-label="New chat"
+            >
+              <Plus className="w-5 h-5" />
+            </button>
             <Link
               href="/upgrade"
               className="hidden md:inline-flex items-center text-xs uppercase tracking-wide border border-primary-500 text-primary-600 px-3 py-1.5 rounded-full hover:bg-primary-600/10 transition"
             >
               Upgrade to Pro
             </Link>
-            <button className="p-2 rounded-full text-[#b4b4b4] hover:bg-[#2f2f2f]">
+            <button className="min-h-11 min-w-11 inline-flex items-center justify-center rounded-full text-[#b4b4b4] hover:bg-[#2f2f2f]">
               <Bell className="w-4 h-4" />
             </button>
             {isAuthenticated ? (
               <div className="relative" ref={userMenuHeaderRef}>
                 <button
                   onClick={() => setShowUserMenuHeader(!showUserMenuHeader)}
-                  className="p-2 rounded-full text-[#b4b4b4] hover:bg-[#2f2f2f] relative"
+                  className="min-h-11 min-w-11 inline-flex items-center justify-center rounded-full text-[#b4b4b4] hover:bg-[#2f2f2f] relative"
                 >
                   <Settings className="w-4 h-4" />
                 </button>
@@ -1592,7 +1655,7 @@ export default function ChatPage() {
               </div>
             ) : (
               <Link href="/login">
-                <button className="p-2 rounded-full text-[#b4b4b4] hover:bg-[#2f2f2f]">
+                <button className="min-h-11 min-w-11 inline-flex items-center justify-center rounded-full text-[#b4b4b4] hover:bg-[#2f2f2f]">
                   <Settings className="w-4 h-4" />
                 </button>
               </Link>
@@ -1600,31 +1663,14 @@ export default function ChatPage() {
           </div>
         </div>
 
-        {/* Mobile Sidebar Toggle */}
-        <div className="md:hidden p-3 border-b border-[#2f2f2f] flex items-center justify-between bg-[#171717]">
-          <button
-            onClick={() => setShowSidebar(!showSidebar)}
-            className="p-2 hover:bg-[#2f2f2f] rounded text-[#ececec]"
-          >
-            <MessageSquare className="w-5 h-5" />
-          </button>
-          <h2 className="font-semibold text-[#ececec]">Chat</h2>
-          <button
-            onClick={createNewSession}
-            className="p-2 hover:bg-[#2f2f2f] rounded text-[#ececec]"
-          >
-            <Plus className="w-5 h-5" />
-          </button>
-        </div>
-
         {/* Messages - ChatGPT Style */}
-        <div className="flex-1 overflow-y-auto">
+        <div className="flex-1 overflow-y-auto overscroll-contain min-h-0">
           {currentSession?.messages.length === 0 && (
-            <div className="flex items-center justify-center h-full">
+            <div className="flex items-center justify-center min-h-full py-8">
               <div className="text-center max-w-2xl px-4">
-                <h1 className="text-4xl font-semibold text-white mb-4">ProcureX</h1>
-                <p className="text-[#b4b4b4] text-lg mb-8">Ask me about IT products, prices, and availability!</p>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                <h1 className="text-3xl sm:text-4xl font-semibold text-white mb-3 sm:mb-4">ProcureX</h1>
+                <p className="text-[#b4b4b4] text-base sm:text-lg mb-6 sm:mb-8">Ask me about IT products, prices, and availability!</p>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   {[
                     "What laptops do you have?",
                     "Show me available phones",
@@ -1634,7 +1680,7 @@ export default function ChatPage() {
                     <button
                       key={suggestion}
                       onClick={() => void handleSend(suggestion)}
-                      className="p-3 bg-[#2f2f2f] hover:bg-[#3d3d3d] rounded-lg text-[#ececec] text-left text-sm transition-colors"
+                      className="p-3 min-h-11 bg-[#2f2f2f] hover:bg-[#3d3d3d] rounded-lg text-[#ececec] text-left text-sm transition-colors"
                     >
                       {suggestion}
                     </button>
@@ -1668,7 +1714,7 @@ export default function ChatPage() {
               <div className="px-4 py-6 bg-transparent">
                 <div className="max-w-3xl mx-auto">
                   <h3 className="text-sm font-semibold text-[#ececec] mb-4">Available Products:</h3>
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                     {productResults.map((product) => (
                       <ProductCard key={product.id} product={product} />
                     ))}
@@ -1682,7 +1728,7 @@ export default function ChatPage() {
         </div>
 
         {/* Input - ChatGPT Style */}
-        <div className="border-t border-[#2f2f2f] bg-[#212121] p-4">
+        <div className="border-t border-[#2f2f2f] bg-[#212121] px-3 sm:px-4 pt-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] shrink-0">
           <div className="max-w-3xl mx-auto">
             <div className={`relative flex items-end bg-[#2f2f2f] rounded-2xl border shadow-lg ${
               voice.listening ? 'border-[#19C37D]' : 'border-transparent'
@@ -1693,7 +1739,7 @@ export default function ChatPage() {
                   onClick={voice.toggleVoiceMode}
                   disabled={isLoading}
                   title={voice.voiceMode ? 'Stop voice chat' : 'Start voice chat'}
-                  className={`m-2 p-2 rounded-lg flex-shrink-0 transition-colors ${
+                  className={`m-1 sm:m-2 min-h-11 min-w-11 inline-flex items-center justify-center rounded-lg flex-shrink-0 transition-colors ${
                     voice.voiceMode
                       ? 'bg-[#19C37D] text-white'
                       : 'text-[#8e8e8e] hover:bg-[#3d3d3d] hover:text-[#ececec]'
@@ -1713,10 +1759,10 @@ export default function ChatPage() {
                       ? 'Speaking...'
                       : 'Message ProcureX...'
                 }
-                className="flex-1 resize-none bg-transparent text-[#ececec] placeholder-[#8e8e8e] px-2 py-3 focus:outline-none max-h-200px overflow-y-auto"
+                className="flex-1 min-w-0 resize-none bg-transparent text-base text-[#ececec] placeholder-[#8e8e8e] px-2 py-3 focus:outline-none overflow-y-auto"
                 rows={1}
                 disabled={isLoading}
-                style={{ maxHeight: '200px' }}
+                style={{ maxHeight: '120px' }}
               />
               {voice.supported && (
                 <button
@@ -1724,7 +1770,7 @@ export default function ChatPage() {
                   onClick={voice.toggleListening}
                   disabled={isLoading || voice.speaking}
                   title={voice.listening ? 'Stop listening' : 'Speak'}
-                  className={`m-2 p-2 rounded-lg flex-shrink-0 transition-colors ${
+                  className={`m-1 sm:m-2 min-h-11 min-w-11 inline-flex items-center justify-center rounded-lg flex-shrink-0 transition-colors ${
                     voice.listening
                       ? 'bg-red-600 text-white animate-pulse'
                       : 'text-[#8e8e8e] hover:bg-[#3d3d3d] hover:text-[#ececec]'
@@ -1736,7 +1782,7 @@ export default function ChatPage() {
               <button
                 onClick={() => void handleSend()}
                 disabled={isLoading || !(input || '').trim()}
-                className="m-2 p-2 rounded-lg bg-primary-600 hover:bg-primary-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex-shrink-0"
+                className="m-1 sm:m-2 min-h-11 min-w-11 inline-flex items-center justify-center rounded-lg bg-primary-600 hover:bg-primary-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex-shrink-0"
               >
                 {isLoading ? (
                   <Loader2 className="w-5 h-5 text-white animate-spin" />
@@ -1745,7 +1791,7 @@ export default function ChatPage() {
                 )}
               </button>
             </div>
-            <p className="text-xs text-[#8e8e8e] text-center mt-2">
+            <p className="text-[11px] sm:text-xs text-[#8e8e8e] text-center mt-2 px-2">
               {voice.voiceMode
                 ? 'Voice chat on. Speak, then ProcureX will answer out loud.'
                 : voice.supported

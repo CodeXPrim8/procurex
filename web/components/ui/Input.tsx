@@ -16,7 +16,7 @@ const Input = forwardRef<HTMLInputElement | HTMLTextAreaElement, InputProps>(
  const isPassword = type === 'password'
  const inputType = isPassword && showPassword ? 'text' : type
  
- const inputClasses = `w-full px-4 py-2 border rounded-lg bg-[#2f2f2f] text-[#ececec] placeholder-[#8e8e8e] focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent ${
+ const inputClasses = `w-full px-4 py-3 sm:py-2 text-base border rounded-lg bg-[#2f2f2f] text-[#ececec] placeholder-[#8e8e8e] focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent ${
  error ? 'border-red-500' : 'border-[#3d3d3d]'
  } ${isPassword ? 'pr-10' : ''} ${className}`
 

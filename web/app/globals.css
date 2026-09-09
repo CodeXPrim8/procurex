@@ -7,9 +7,26 @@
  --background-rgb: 33, 33, 33;
 }
 
+html {
+ scroll-behavior: smooth;
+ -webkit-text-size-adjust: 100%;
+}
+
 body {
  color: rgb(var(--foreground-rgb));
  background: #212121;
+}
+
+button,
+a,
+[role='button'] {
+ touch-action: manipulation;
+}
+
+input,
+textarea,
+select {
+ font-size: 16px;
 }
 
 /* ChatGPT-style scrollbar */
@@ -47,7 +64,11 @@ body {
  animation: slide-in 0.3s ease-out;
 }
 
-/* Smooth scrolling */
-html {
- scroll-behavior: smooth;
+.no-scrollbar {
+ -ms-overflow-style: none;
+ scrollbar-width: none;
+}
+
+.no-scrollbar::-webkit-scrollbar {
+ display: none;
 }

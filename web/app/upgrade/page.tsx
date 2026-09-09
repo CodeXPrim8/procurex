@@ -93,14 +93,14 @@ const faqs = [
 
 export default function UpgradePage() {
  return (
- <div className="py-12 lg:py-16 space-y-16">
+ <div className="py-8 sm:py-12 lg:py-16 space-y-12 sm:space-y-16">
  <section className="text-center space-y-6">
  <span className="inline-flex items-center gap-2 px-4 py-1 rounded-full border border-primary-200 text-[#19C37D] bg-[#171717] text-sm font-semibold">
  <Sparkles className="w-4 h-4" />
  Premium procurement workspace
  </span>
  <div className="space-y-4 max-w-3xl mx-auto">
- <h1 className="text-4xl md:text-5xl font-bold text-[#ececec] tracking-tight">
+ <h1 className="text-3xl sm:text-4xl md:text-5xl font-bold text-[#ececec] tracking-tight">
  Upgrade to Pro. Scale your sourcing with confidence.
  </h1>
  <p className="text-lg text-[#b4b4b4]">
@@ -166,7 +166,7 @@ export default function UpgradePage() {
  </section>
 
  <section className="grid gap-8 lg:grid-cols-2">
- <div className="rounded-2xl border border-[#2f2f2f] bg-[#2f2f2f] p-8 space-y-6">
+ <div className="rounded-2xl border border-[#2f2f2f] bg-[#2f2f2f] p-5 sm:p-8 space-y-6">
  <div className="flex items-center gap-3">
  <Shield className="w-6 h-6 text-primary-600" />
  <div>
@@ -189,7 +189,7 @@ export default function UpgradePage() {
  </div>
  </div>
 
- <div className="rounded-2xl border border-[#2f2f2f] bg-[#2f2f2f] p-8 space-y-6">
+ <div className="rounded-2xl border border-[#2f2f2f] bg-[#2f2f2f] p-5 sm:p-8 space-y-6">
  <div className="flex items-center gap-3">
  <Headphones className="w-6 h-6 text-primary-600" />
  <div>
@@ -221,7 +221,7 @@ export default function UpgradePage() {
  </div>
  </section>
 
- <section className="rounded-2xl border border-[#2f2f2f] bg-[#2f2f2f] p-8 space-y-6">
+ <section className="rounded-2xl border border-[#2f2f2f] bg-[#2f2f2f] p-5 sm:p-8 space-y-6">
  <div className="flex items-center gap-3">
  <Zap className="w-6 h-6 text-primary-600" />
  <div>
@@ -240,7 +240,7 @@ export default function UpgradePage() {
  </div>
  </section>
 
- <section className="rounded-2xl border border-[#2f2f2f] bg-[#2f2f2f] p-8 space-y-6">
+ <section className="rounded-2xl border border-[#2f2f2f] bg-[#2f2f2f] p-5 sm:p-8 space-y-6">
  <div className="text-center space-y-2">
  <h3 className="text-2xl font-semibold text-[#ececec]">Questions? We’ve got answers.</h3>
  <p className="text-sm text-[#8e8e8e]">Everything about billing, security, and onboarding.</p>

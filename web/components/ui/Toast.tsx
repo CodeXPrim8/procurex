@@ -34,13 +34,13 @@ export default function Toast({ message, type, onClose, duration = 5000 }: Toast
 
  return (
  <div
- className={`fixed top-4 right-4 z-50 flex items-center space-x-3 px-4 py-3 rounded-lg shadow-lg border ${styles[type]} animate-slide-in`}
+ className={`pointer-events-auto flex items-start space-x-3 px-4 py-3 rounded-lg shadow-lg border w-full sm:min-w-[18rem] ${styles[type]} animate-slide-in`}
  >
  {icons[type]}
- <p className="text-sm font-medium text-[#ececec]">{message}</p>
+ <p className="text-sm font-medium text-[#ececec] flex-1 break-words">{message}</p>
  <button
  onClick={onClose}
- className="text-[#8e8e8e] hover:text-[#ececec] focus:outline-none"
+ className="text-[#8e8e8e] hover:text-[#ececec] focus:outline-none min-h-11 min-w-11 inline-flex items-center justify-center -mr-2 -mt-1"
  >
  <X className="w-4 h-4" />
  </button>
@@ -56,7 +56,7 @@ interface ToastContainerProps {
 
 export function ToastContainer({ toasts, onRemove }: ToastContainerProps) {
  return (
- <div className="fixed top-4 right-4 z-50 space-y-2">
+ <div className="fixed top-[max(1rem,env(safe-area-inset-top))] inset-x-3 sm:inset-x-auto sm:right-4 z-50 space-y-2 max-w-md pointer-events-none">
  {toasts.map((toast) => (
  <Toast
  key={toast.id}

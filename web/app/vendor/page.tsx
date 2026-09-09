@@ -638,22 +638,22 @@ export default function VendorDashboard() {
  }
 
  return (
- <div className="min-h-screen bg-[#212121]">
+ <div className="min-h-dvh bg-[#212121]">
  {/* Header */}
  <div className="bg-[#2f2f2f] border-b border-[#2f2f2f]">
- <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
- <div className="flex items-center justify-between">
- <div>
- <h1 className="text-3xl font-bold text-[#ececec]">Vendor Dashboard</h1>
- <p className="text-[#b4b4b4] mt-1">Welcome back, {vendor.company_name}</p>
+ <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4 sm:py-6">
+ <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+ <div className="min-w-0">
+ <h1 className="text-2xl sm:text-3xl font-bold text-[#ececec]">Vendor Dashboard</h1>
+ <p className="text-[#b4b4b4] mt-1 truncate">Welcome back, {vendor.company_name}</p>
  </div>
- <div className="flex items-center space-x-3">
+ <div className="flex items-center gap-3 flex-wrap">
  <Badge variant={(verificationColors[vendor.verification_status] || 'default') as 'success' | 'warning' | 'danger' | 'default'} className="text-sm px-3 py-1">
  {vendor.verification_status === 'verified' && <CheckCircle className="w-4 h-4 mr-1 inline" />}
  {vendor.verification_status === 'pending' && <AlertCircle className="w-4 h-4 mr-1 inline" />}
  {vendor.verification_status || 'Not Verified'}
  </Badge>
- <Button onClick={openCreateProductModal} className="bg-primary-600 hover:bg-primary-700">
+ <Button onClick={openCreateProductModal} className="bg-primary-600 hover:bg-primary-700 flex-1 sm:flex-none">
  <Plus className="w-5 h-5 mr-2" />
  Add Product
  </Button>
@@ -662,56 +662,56 @@ export default function VendorDashboard() {
  </div>
  </div>
 
- <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+ <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4 sm:py-8">
  {/* Stats Cards */}
- <div className="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8">
- <div className="bg-[#2f2f2f] rounded-xl p-6 border border-[#2f2f2f] hover:bg-[#353535] transition-shadow">
+ <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-6 mb-6 sm:mb-8">
+ <div className="bg-[#2f2f2f] rounded-xl p-4 sm:p-6 border border-[#2f2f2f] hover:bg-[#353535] transition-shadow">
  <div className="flex items-center justify-between">
  <div>
- <p className="text-sm font-medium text-[#b4b4b4] uppercase tracking-wide">Total Products</p>
- <p className="text-3xl font-bold text-[#ececec] mt-2">{totalProducts}</p>
+ <p className="text-xs sm:text-sm font-medium text-[#b4b4b4] uppercase tracking-wide">Total Products</p>
+ <p className="text-2xl sm:text-3xl font-bold text-[#ececec] mt-2">{totalProducts}</p>
  <p className="text-xs text-[#8e8e8e] mt-1">{inStockProducts} in stock</p>
  </div>
- <div className="p-3 bg-[#171717] rounded-lg">
+ <div className="p-2 sm:p-3 bg-[#171717] rounded-lg hidden sm:block">
  <Package className="w-8 h-8 text-primary-600" />
  </div>
  </div>
  </div>
 
- <div className="bg-[#2f2f2f] rounded-xl p-6 border border-[#2f2f2f] hover:bg-[#353535] transition-shadow">
+ <div className="bg-[#2f2f2f] rounded-xl p-4 sm:p-6 border border-[#2f2f2f] hover:bg-[#353535] transition-shadow">
  <div className="flex items-center justify-between">
  <div>
- <p className="text-sm font-medium text-[#b4b4b4] uppercase tracking-wide">In Stock</p>
- <p className="text-3xl font-bold text-green-600 mt-2">{inStockProducts}</p>
+ <p className="text-xs sm:text-sm font-medium text-[#b4b4b4] uppercase tracking-wide">In Stock</p>
+ <p className="text-2xl sm:text-3xl font-bold text-green-600 mt-2">{inStockProducts}</p>
  <p className="text-xs text-[#8e8e8e] mt-1">{outOfStockProducts} out of stock</p>
  </div>
- <div className="p-3 bg-green-100 rounded-lg">
+ <div className="p-3 bg-green-100 rounded-lg hidden sm:block">
  <CheckCircle className="w-8 h-8 text-green-600" />
  </div>
  </div>
  </div>
 
- <div className="bg-[#2f2f2f] rounded-xl p-6 border border-[#2f2f2f] hover:bg-[#353535] transition-shadow">
+ <div className="bg-[#2f2f2f] rounded-xl p-4 sm:p-6 border border-[#2f2f2f] hover:bg-[#353535] transition-shadow">
  <div className="flex items-center justify-between">
  <div>
- <p className="text-sm font-medium text-[#b4b4b4] uppercase tracking-wide">Inventory Value</p>
- <p className="text-3xl font-bold text-blue-600 mt-2">${totalValue.toFixed(2)}</p>
+ <p className="text-xs sm:text-sm font-medium text-[#b4b4b4] uppercase tracking-wide">Inventory Value</p>
+ <p className="text-xl sm:text-3xl font-bold text-blue-600 mt-2 break-all">${totalValue.toFixed(2)}</p>
  <p className="text-xs text-[#8e8e8e] mt-1">Total stock value</p>
  </div>
- <div className="p-3 bg-blue-100 rounded-lg">
+ <div className="p-3 bg-blue-100 rounded-lg hidden sm:block">
  <DollarSign className="w-8 h-8 text-blue-600" />
  </div>
  </div>
  </div>
 
- <div className="bg-[#2f2f2f] rounded-xl p-6 border border-[#2f2f2f] hover:bg-[#353535] transition-shadow">
+ <div className="bg-[#2f2f2f] rounded-xl p-4 sm:p-6 border border-[#2f2f2f] hover:bg-[#353535] transition-shadow">
  <div className="flex items-center justify-between">
  <div>
- <p className="text-sm font-medium text-[#b4b4b4] uppercase tracking-wide">Avg. Price</p>
- <p className="text-3xl font-bold text-primary-600 mt-2">${averagePrice.toFixed(2)}</p>
+ <p className="text-xs sm:text-sm font-medium text-[#b4b4b4] uppercase tracking-wide">Avg. Price</p>
+ <p className="text-xl sm:text-3xl font-bold text-primary-600 mt-2 break-all">${averagePrice.toFixed(2)}</p>
  <p className="text-xs text-[#8e8e8e] mt-1">Per product</p>
  </div>
- <div className="p-3 bg-[#171717] rounded-lg">
+ <div className="p-2 sm:p-3 bg-[#171717] rounded-lg hidden sm:block">
  <TrendingUp className="w-8 h-8 text-primary-600" />
  </div>
  </div>
@@ -720,11 +720,11 @@ export default function VendorDashboard() {
 
  {/* Tabs */}
  <div className="bg-[#2f2f2f] rounded-xl border border-[#2f2f2f] mb-6">
- <div className="border-b border-[#2f2f2f]">
- <nav className="flex -mb-px">
+ <div className="border-b border-[#2f2f2f] overflow-x-auto no-scrollbar">
+ <nav className="flex -mb-px min-w-max">
  <button
  onClick={() => setActiveTab('products')}
- className={`px-6 py-4 text-sm font-medium border-b-2 transition-colors ${
+ className={`px-4 sm:px-6 py-3 sm:py-4 text-sm font-medium border-b-2 transition-colors whitespace-nowrap ${
  activeTab === 'products'
  ? 'border-primary-600 text-primary-600'
  : 'border-transparent text-[#8e8e8e] hover:text-[#b4b4b4] hover:border-[#3d3d3d]'
@@ -735,7 +735,7 @@ export default function VendorDashboard() {
  </button>
  <button
  onClick={() => setActiveTab('info')}
- className={`px-6 py-4 text-sm font-medium border-b-2 transition-colors ${
+ className={`px-4 sm:px-6 py-3 sm:py-4 text-sm font-medium border-b-2 transition-colors whitespace-nowrap ${
  activeTab === 'info'
  ? 'border-primary-600 text-primary-600'
  : 'border-transparent text-[#8e8e8e] hover:text-[#b4b4b4] hover:border-[#3d3d3d]'
@@ -746,7 +746,7 @@ export default function VendorDashboard() {
  </button>
  <button
  onClick={() => setActiveTab('analytics')}
- className={`px-6 py-4 text-sm font-medium border-b-2 transition-colors ${
+ className={`px-4 sm:px-6 py-3 sm:py-4 text-sm font-medium border-b-2 transition-colors whitespace-nowrap ${
  activeTab === 'analytics'
  ? 'border-primary-600 text-primary-600'
  : 'border-transparent text-[#8e8e8e] hover:text-[#b4b4b4] hover:border-[#3d3d3d]'
@@ -758,13 +758,13 @@ export default function VendorDashboard() {
  </nav>
  </div>
 
- <div className="p-6">
+ <div className="p-4 sm:p-6">
  {/* Products Tab */}
  {activeTab === 'products' && (
  <div className="space-y-6">
  {/* Search and Filters */}
- <div className="flex flex-col sm:flex-row gap-4 items-center justify-between">
- <div className="flex-1 max-w-md">
+ <div className="flex flex-col gap-3 sm:flex-row sm:gap-4 sm:items-center sm:justify-between">
+ <div className="flex-1 w-full sm:max-w-md">
  <div className="relative">
  <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 w-5 h-5 text-[#8e8e8e]" />
  <Input
@@ -775,7 +775,7 @@ export default function VendorDashboard() {
  />
  </div>
  </div>
- <div className="flex items-center space-x-2">
+ <div className="flex items-center gap-2 w-full sm:w-auto flex-wrap">
  <Button
  variant="outline"
  size="sm"
@@ -803,7 +803,7 @@ export default function VendorDashboard() {
  <Package className="w-16 h-16 text-gray-400 mx-auto mb-4" />
  <h3 className="text-lg font-semibold text-[#ececec] mb-2">No products yet</h3>
  <p className="text-[#b4b4b4] mb-6">Start by adding your first product to the catalog</p>
- <div className="flex justify-center space-x-3">
+ <div className="flex flex-col sm:flex-row justify-center gap-3">
  <Button variant="outline" onClick={openSearchProductModal}>
  <Search className="w-4 h-4 mr-2" />
  Add Existing Product
@@ -931,8 +931,8 @@ export default function VendorDashboard() {
  ) : (
  <div className="space-y-4">
  {filteredProducts.map((vp) => (
- <div key={vp.id} className="bg-[#2f2f2f] rounded-lg border border-[#2f2f2f] p-6 hover:bg-[#353535] transition-shadow">
- <div className="flex items-start gap-6">
+ <div key={vp.id} className="bg-[#2f2f2f] rounded-lg border border-[#2f2f2f] p-4 sm:p-6 hover:bg-[#353535] transition-shadow">
+ <div className="flex flex-col sm:flex-row items-start gap-4 sm:gap-6">
  {/* Product Image */}
  <div className="relative w-24 h-24 bg-[#2f2f2f] rounded-lg overflow-hidden flex-shrink-0">
  {(() => {
@@ -1282,7 +1282,7 @@ export default function VendorDashboard() {
  }
  size="xl"
  footer={
- <div className="flex justify-end space-x-2">
+ <div className="flex justify-end gap-2 w-full sm:w-auto flex-col-reverse sm:flex-row">
  <Button variant="outline" onClick={() => {
  setShowProductModal(false)
  resetProductForm()

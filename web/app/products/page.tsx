@@ -80,7 +80,7 @@ export default function ProductsPage() {
  return (
  <div className="space-y-6">
  <div className="flex items-center justify-between">
- <h1 className="text-3xl font-bold text-[#ececec]">Products</h1>
+ <h1 className="text-2xl sm:text-3xl font-bold text-[#ececec]">Products</h1>
  <Button
  variant="outline"
  onClick={() => setShowFilters(!showFilters)}
@@ -116,11 +116,11 @@ export default function ProductsPage() {
  <label className="block text-sm font-medium text-[#b4b4b4] mb-2">
  Category
  </label>
- <div className="flex flex-wrap gap-2">
+ <div className="flex flex-wrap gap-2 overflow-x-auto no-scrollbar pb-1 -mx-1 px-1">
  <button
  type="button"
  onClick={() => setCategory('')}
- className={`px-3 py-1 rounded-full text-sm ${
+ className={`min-h-11 px-3 py-1.5 rounded-full text-sm ${
  category === ''
  ? 'bg-primary-600 text-white'
  : 'bg-[#2f2f2f] text-[#b4b4b4] hover:bg-[#3d3d3d]'
@@ -133,7 +133,7 @@ export default function ProductsPage() {
  key={cat}
  type="button"
  onClick={() => setCategory(cat)}
- className={`px-3 py-1 rounded-full text-sm ${
+ className={`min-h-11 px-3 py-1.5 rounded-full text-sm ${
  category === cat
  ? 'bg-primary-600 text-white'
  : 'bg-[#2f2f2f] text-[#b4b4b4] hover:bg-[#3d3d3d]'

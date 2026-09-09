@@ -23,11 +23,20 @@ export default function Layout({ children }: LayoutProps) {
 
  const pathname = usePathname()
  const isChatPage = pathname === '/chat'
- 
+ const isAuthPage = pathname === '/login' || pathname === '/register'
+
  return (
- <div className="min-h-screen bg-[#212121] text-[#ececec]">
+ <div className="min-h-dvh bg-[#212121] text-[#ececec]">
  {!isChatPage && <Navbar />}
- <main className={isChatPage ? 'min-h-screen' : 'max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8'}>
+ <main
+ className={
+ isChatPage
+ ? 'min-h-0'
+ : isAuthPage
+ ? ''
+ : 'max-w-7xl mx-auto px-3 sm:px-6 lg:px-8 py-4 sm:py-8'
+ }
+ >
  {children}
  </main>
  <ToastContainer

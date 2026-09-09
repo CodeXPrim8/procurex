@@ -16,24 +16,24 @@ export default function ChatMessage({ message, onSpeak }: ChatMessageProps) {
  
  return (
  <div className={`${isUser ? 'bg-[#212121]' : 'bg-[#2f2f2f]'} border-b border-[#2f2f2f]`}>
- <div className="max-w-3xl mx-auto px-4 py-6">
- <div className="flex items-start space-x-4">
+ <div className="max-w-3xl mx-auto px-3 sm:px-4 py-4 sm:py-6">
+ <div className="flex items-start space-x-3 sm:space-x-4">
  {/* Avatar */}
  <div className="flex-shrink-0">
  {isUser ? (
- <div className="w-8 h-8 rounded-full bg-[#3d3d3d] flex items-center justify-center">
- <User className="w-5 h-5 text-white" />
+ <div className="w-7 h-7 sm:w-8 sm:h-8 rounded-full bg-[#3d3d3d] flex items-center justify-center">
+ <User className="w-4 h-4 sm:w-5 sm:h-5 text-white" />
  </div>
  ) : (
- <div className="w-8 h-8 rounded-full bg-[#19C37D] flex items-center justify-center">
- <MessageSquare className="w-5 h-5 text-white" />
+ <div className="w-7 h-7 sm:w-8 sm:h-8 rounded-full bg-[#19C37D] flex items-center justify-center">
+ <MessageSquare className="w-4 h-4 sm:w-5 sm:h-5 text-white" />
  </div>
  )}
  </div>
  
  {/* Message Content */}
- <div className="flex-1 min-w-0">
- <div className="prose prose-invert max-w-none text-[#ececec]">
+ <div className="flex-1 min-w-0 overflow-hidden">
+ <div className="prose prose-invert max-w-none text-[#ececec] text-sm sm:text-base break-words">
  <ReactMarkdown
  components={{
  p: ({ children }) => <p className="mb-4 last:mb-0 leading-relaxed">{children}</p>,
