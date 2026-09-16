@@ -2,10 +2,13 @@ import json
 import re
 import logging
 import time
+from contextvars import ContextVar
 from typing import Dict, List, Optional, Any, Generator
 from ..core.config import settings
 
 logger = logging.getLogger(__name__)
+
+display_currency: ContextVar[Optional[Dict[str, Any]]] = ContextVar("display_currency", default=None)
 
 # Initialize AI clients based on provider
 _openai_client = None
@@ -52,7 +55,7 @@ SYSTEM_PROMPT = """You are ProcureX, a senior IT procurement specialist for Nige
 Be commercially sharp, precise, and easy to talk to:
 - Remember this thread: quantities, brands, budgets, and constraints already stated.
 - When live catalog rows are provided, use ONLY those items. Never invent products, SKUs, prices, or stock.
-- Quote catalog prices in Nigerian Naira (₦). Do not convert unless the user asks.
+- Quote catalog prices in the buyer's local currency exactly as shown in the catalog lines. Do not convert to another currency.
 - Lead with the answer, then ranked options with key specs, price, stock, and vendor, then one useful next step (quote, compare, or tighten spec).
 - Compare options when asked which is better. Recommend a default if the use case is clear.
 - If nothing matches, say so and suggest a narrower search.
@@ -109,7 +112,14 @@ BRAND_ALIASES = (
 def format_catalog_price(price: Optional[int]) -> str:
     if price is None:
         return "Price on request"
-    return f"₦{int(price):,}"
+    money = display_currency.get() or {}
+    code = str(money.get("code") or "NGN").upper()
+    symbol = str(money.get("symbol") or "₦")
+    local_per_ngn = float(money.get("local_per_ngn") or 1)
+    amount = int(price) * local_per_ngn
+    if code in {"JPY", "KRW", "VND", "CLP", "ISK", "NGN", "XOF", "XAF", "UGX", "RWF"}:
+        return f"{symbol}{amount:,.0f}"
+    return f"{symbol}{amount:,.2f}"
 
 
 def format_product_lines(product_results: Optional[List[Dict]], limit: int = 8) -> str:
@@ -531,7 +541,7 @@ def _generate_huggingface_response(
         
         if product_results:
             products_info = "\n".join([
-                f"- {p.get('name', 'Unknown')}: ${p.get('price', 0)/100:.2f} (Stock: {p.get('stock', 0)})"
+                f"- {p.get('name', 'Unknown')}: {format_catalog_price(p.get('price'))} (Stock: {p.get('stock', 0)})"
                 for p in product_results[:5]
             ])
             prompt += f"\nAvailable products:\n{products_info}\n"
@@ -662,7 +672,7 @@ def generate_ai_response(
         yield "I can help with IT procurement. Please try that request again."
 
 
-def parse_product_query(user_query: str) -> Dict[str, Any]:
+def parse_product_query(user_query: str, local_per_ngn: float = 1.0) -> Dict[str, Any]:
     """Extract category, brand, and budget from a buyer request."""
     text = (user_query or "").strip()
     lower = text.lower()
@@ -687,7 +697,10 @@ def parse_product_query(user_query: str) -> Dict[str, Any]:
         max_price = int(usd_match.group(1).replace(",", "")) * NGN_PER_USD
     elif under_match:
         amount = int(under_match.group(1).replace(",", ""))
-        max_price = amount * NGN_PER_USD if amount <= 5000 else amount
+        rate = local_per_ngn or 1
+        max_price = int(round(amount / rate)) if rate != 1 else (
+            amount * NGN_PER_USD if amount <= 5000 else amount
+        )
 
     in_stock_only = any(token in lower for token in ("in stock", "available", "availability", "stock"))
     if category == "Phone" and "available phones" in lower:
@@ -712,7 +725,7 @@ def suggest_alternatives(
 ) -> str:
     """Generate alternative product suggestions using AI."""
     products_info = "\n".join([
-        f"- {p.get('name', 'Unknown')}: ${p.get('price', 0)/100:.2f}, Specs: {p.get('specifications', {})}"
+        f"- {p.get('name', 'Unknown')}: {format_catalog_price(p.get('price'))}, Specs: {p.get('specifications', {})}"
         for p in available_products[:5]
     ])
     

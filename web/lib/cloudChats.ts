@@ -32,9 +32,9 @@ function isMissingTable(error: any) {
 
 async function currentUserId() {
   try {
-    const { data, error } = await withTimeout(supabase.auth.getUser(), 6000)
-    if (error || !data.user?.id) return null
-    return data.user.id
+    const { data, error } = await withTimeout(supabase.auth.getSession(), 6000)
+    if (error || !data.session?.user?.id) return null
+    return data.session.user.id
   } catch {
     return null
   }

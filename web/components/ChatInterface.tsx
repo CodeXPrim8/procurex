@@ -7,6 +7,7 @@ import { chatAPI } from '@/lib/api'
 import ChatMessage from './ChatMessage'
 import ProductCard from './ProductCard'
 import { supabase } from '@/lib/supabaseClient'
+import { getDisplayCurrency } from '@/lib/currency'
 
 export default function ChatInterface() {
  const [input, setInput] = useState('')
@@ -131,7 +132,15 @@ export default function ChatInterface() {
  // Wait a bit for WebSocket to connect, then send message
  setTimeout(() => {
  if (wsRef.current?.readyState === WebSocket.OPEN) {
- wsRef.current.send(JSON.stringify({ message: userMessage }))
+ void getDisplayCurrency().then((money) => {
+ wsRef.current?.send(JSON.stringify({
+ message: userMessage,
+ currency: money.currency,
+ currency_symbol: money.symbol,
+ country: money.country,
+ local_per_ngn: money.localPerNgn,
+ }))
+ })
  } else {
  // Fallback to HTTP if WebSocket fails
  handleSendHTTP(userMessage)

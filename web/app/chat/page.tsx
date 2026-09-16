@@ -39,7 +39,7 @@ import Button from '@/components/ui/Button'
 import { showToast } from '@/lib/toast'
 import { getAccessToken } from '@/lib/sessionToken'
 import { naturalChatTitle } from '@/lib/chatTitle'
-import { formatPriceRange, getCurrencySymbol } from '@/lib/currency'
+import { formatPriceRange, getDisplayCurrency, formatFromUsd } from '@/lib/currency'
 import { useVoiceChat } from '@/lib/useVoiceChat'
 import {
   cloudChatsReady,
@@ -158,6 +158,7 @@ export default function ChatPage() {
   const [showSearchModal, setShowSearchModal] = useState(false)
   const [showComposerMenu, setShowComposerMenu] = useState(false)
   const [accountSyncReady, setAccountSyncReady] = useState<boolean | null>(null)
+  const [budgetHint, setBudgetHint] = useState('Find products under $500')
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const wsRef = useRef<WebSocket | null>(null)
   const wsSessionIdRef = useRef<number | null>(null)
@@ -190,6 +191,8 @@ export default function ChatPage() {
     },
     onError: (message) => showToast(message, 'error'),
   })
+  const speakReplyFn = useRef(voice.speakReply)
+  speakReplyFn.current = voice.speakReply
 
   // Check backend health with better error handling
   const checkBackendHealth = async (): Promise<boolean> => {
@@ -301,6 +304,9 @@ export default function ChatPage() {
 
   useEffect(() => {
     setClientReady(true)
+    void formatFromUsd(500).then((amount) => {
+      setBudgetHint(`Find products under ${amount}`)
+    })
   }, [])
 
   useEffect(() => {
@@ -982,6 +988,9 @@ export default function ChatPage() {
             data.title || current.title
           )
         }
+        if (liveAssistantRef.current && liveAssistantRef.current !== '...') {
+          speakReplyFn.current(liveAssistantRef.current)
+        }
         if (sid && isServerSession(sid) && !data.title) {
           chatAPI
             .getSession(sid)
@@ -1290,6 +1299,7 @@ export default function ChatPage() {
           setSessions(persistGuestSessions(finalSession))
           
           setIsLoading(false)
+          speakReplyFn.current(response)
       }, 500)
       return
     }
@@ -1302,7 +1312,14 @@ export default function ChatPage() {
       if (connected && wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
         // Wait a bit for WebSocket to be fully ready
         await new Promise(resolve => setTimeout(resolve, 100))
-        wsRef.current.send(JSON.stringify({ message: userMessage }))
+        const money = await getDisplayCurrency()
+        wsRef.current.send(JSON.stringify({
+          message: userMessage,
+          currency: money.currency,
+          currency_symbol: money.symbol,
+          country: money.country,
+          local_per_ngn: money.localPerNgn,
+        }))
         return
       }
 
@@ -1319,7 +1336,6 @@ export default function ChatPage() {
       try {
         let assistantResponse = ""
         const lowerMessage = userMessage.toLowerCase().trim()
-        const currencySymbol = await getCurrencySymbol()
         const priceRange = await formatPriceRange(30000, 80000)
         
         // Get conversation context
@@ -1394,6 +1410,7 @@ export default function ChatPage() {
         }
 
         setIsLoading(false)
+        speakReplyFn.current(assistantResponse)
         void persistAccountMessage(session, 'assistant', assistantResponse, nextTitle)
         if (wsId) {
           try {
@@ -1409,7 +1426,6 @@ export default function ChatPage() {
         const lowerMessage = userMessage.toLowerCase().trim()
         const conversationHistory = session?.messages || []
         const lastFewMessages = conversationHistory.slice(-4).map(m => m.content.toLowerCase())
-        const currencySymbol = await getCurrencySymbol()
         const priceRange = await formatPriceRange(30000, 80000)
         
         // Use same logic as above
@@ -1460,6 +1476,7 @@ export default function ChatPage() {
         }
 
         setIsLoading(false)
+        speakReplyFn.current(assistantResponse)
         void persistAccountMessage(session, 'assistant', assistantResponse, nextTitle)
         if (wsId) {
           try {
@@ -2058,7 +2075,7 @@ export default function ChatPage() {
                   {[
                     "What laptops do you have?",
                     "Show me available phones",
-                    "Find products under $500",
+                    budgetHint,
                     "What's in stock?"
                   ].map((suggestion) => (
                     <button
@@ -2138,7 +2155,13 @@ export default function ChatPage() {
             <div className="md:hidden flex items-center gap-2.5">
               <div className="flex-1 h-12 rounded-full bg-[#303030] flex items-center px-4 text-[#8e8e8e]">
                 <Plus className="w-5 h-5 text-white mr-3 flex-shrink-0" />
-                <span>Ask ProcureX</span>
+                <span>
+                  {voice.speaking
+                    ? 'ProcureX is speaking...'
+                    : voice.listening
+                      ? 'Listening...'
+                      : 'Ask ProcureX'}
+                </span>
               </div>
               <button
                 type="button"
@@ -2277,9 +2300,9 @@ export default function ChatPage() {
             </div>
             <p className="hidden md:block text-xs text-[#8e8e8e] text-center mt-2 px-2">
               {voice.voiceMode
-                ? 'Voice chat on. Speak, then ProcureX will reply in the chat.'
+                ? 'Voice chat on. Speak, then ProcureX will talk back.'
                 : voice.supported
-                  ? 'Tap the mic to talk, or the waveform for hands-free voice chat.'
+                  ? 'Tap the mic to talk, or the waveform for hands-free voice chat. ProcureX will speak the reply.'
                   : 'AI can make mistakes. Check important info.'}
             </p>
           </div>

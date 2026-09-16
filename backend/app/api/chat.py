@@ -17,7 +17,7 @@ from ..schemas.chat import (
     ChatSessionResponse,
     ChatSessionSummary,
 )
-from ..services.ai_service import generate_ai_response, parse_product_query, is_catalog_query
+from ..services.ai_service import generate_ai_response, parse_product_query, is_catalog_query, display_currency
 from ..services.chat_title import (
     natural_chat_title,
     should_replace_title,
@@ -235,6 +235,7 @@ async def websocket_chat(
         
         while True:
             try:
+                currency_token = None
                 # Receive user message
                 data = await websocket.receive_json()
                 user_message = data.get("message", "")
@@ -245,6 +246,17 @@ async def websocket_chat(
                         "error": "Please provide a message."
                     })
                     continue
+
+                local_per_ngn = 1.0
+                try:
+                    local_per_ngn = float(data.get("local_per_ngn") or 1) or 1
+                except (TypeError, ValueError):
+                    local_per_ngn = 1.0
+                currency_token = display_currency.set({
+                    "code": str(data.get("currency") or "NGN"),
+                    "symbol": str(data.get("currency_symbol") or "₦"),
+                    "local_per_ngn": local_per_ngn,
+                })
                 
                 # Send typing indicator immediately for instant feedback
                 try:
@@ -292,7 +304,7 @@ async def websocket_chat(
                     thread_db = None
                     try:
                         thread_db = next(get_db())
-                        parsed_query = parse_product_query(user_message)
+                        parsed_query = parse_product_query(user_message, local_per_ngn)
                         if not is_catalog_query(user_message, parsed_query):
                             return []
                         search_query = ProductSearch(
@@ -323,7 +335,7 @@ async def websocket_chat(
                 except Exception as e:
                     logger.warning(f"Catalog search skipped: {e}")
                     try:
-                        parsed_query = parse_product_query(user_message)
+                        parsed_query = parse_product_query(user_message, local_per_ngn)
                         if is_catalog_query(user_message, parsed_query):
                             product_results = search_products(
                                 db,
@@ -460,6 +472,9 @@ async def websocket_chat(
                 except Exception:
                     break
                 continue
+            finally:
+                if currency_token is not None:
+                    display_currency.reset(currency_token)
             
     except WebSocketDisconnect:
         logger.info("WebSocket disconnected for session %s", session_id)

@@ -2,13 +2,13 @@
 
 import { useState, useEffect } from 'react'
 import { useParams, useRouter } from 'next/navigation'
-import { ArrowLeft, DollarSign, CheckCircle, Package, ShoppingCart } from 'lucide-react'
+import { ArrowLeft, CheckCircle, Package, ShoppingCart } from 'lucide-react'
 import { productAPI, quotationAPI } from '@/lib/api'
 import { showToast } from '@/lib/toast'
 import Button from '@/components/ui/Button'
 import Badge from '@/components/ui/Badge'
 import { useRequireAuth } from '@/lib/auth'
-import { formatPrice, getCurrencySymbol } from '@/lib/currency'
+import { formatPrice } from '@/lib/currency'
 import { resolveMediaUrl, productImageList } from '@/lib/media'
 
 // Helper component for alternative products
@@ -44,7 +44,6 @@ export default function ProductDetailPage() {
  const [loading, setLoading] = useState(true)
  const [quantity, setQuantity] = useState(1)
  const [formattedPrice, setFormattedPrice] = useState('')
- const [currencySymbol, setCurrencySymbol] = useState('$')
  const [activeImage, setActiveImage] = useState(0)
 
  useEffect(() => {
@@ -61,9 +60,7 @@ export default function ProductDetailPage() {
  
  // Format price based on location
  const price = await formatPrice(productData.price || 0)
- const symbol = await getCurrencySymbol()
  setFormattedPrice(price)
- setCurrencySymbol(symbol)
  
  // Load alternatives
  const altProducts = await productAPI.getAlternatives(Number(params.id))
@@ -183,12 +180,7 @@ export default function ProductDetailPage() {
  </div>
 
  <div className="flex items-center space-x-2">
- {currencySymbol === '₦' ? (
- <span className="text-4xl font-bold text-green-600">₦</span>
- ) : (
- <DollarSign className="w-6 h-6 text-green-600" />
- )}
- <span className="text-4xl font-bold text-[#ececec]">{formattedPrice || '...'}</span>
+ <span className="text-4xl font-bold text-[#19C37D]">{formattedPrice || '...'}</span>
  </div>
 
  {product.description && (

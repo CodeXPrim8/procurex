@@ -217,11 +217,12 @@ export const authAPI = {
   },
 
   getMe: async () => {
-    const { data, error } = await supabase.auth.getUser()
-    if (error) {
-      throw error
+    const { data, error } = await supabase.auth.getSession()
+    if (error) throw error
+    if (!data.session?.user) {
+      throw new Error('Not signed in')
     }
-    return data.user
+    return data.session.user
   },
 
   logout: async () => {

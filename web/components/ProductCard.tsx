@@ -4,7 +4,7 @@ import { useState, useEffect } from 'react'
 import { Package, CheckCircle } from 'lucide-react'
 import Link from 'next/link'
 import Badge from './ui/Badge'
-import { formatPrice, getCurrencySymbol } from '@/lib/currency'
+import { formatPrice } from '@/lib/currency'
 import { resolveMediaUrl, productImageList } from '@/lib/media'
 
 interface ProductCardProps {
@@ -24,16 +24,13 @@ interface ProductCardProps {
 
 export default function ProductCard({ product }: ProductCardProps) {
  const [formattedPrice, setFormattedPrice] = useState('')
- const [currencySymbol, setCurrencySymbol] = useState('$')
  const isInStock = product.stock > 0
  const coverImage = productImageList(product)[0]
 
  useEffect(() => {
  const loadPrice = async () => {
  const price = await formatPrice(product.price)
- const symbol = await getCurrencySymbol()
  setFormattedPrice(price)
- setCurrencySymbol(symbol)
  }
  loadPrice()
  }, [product.price])
@@ -85,7 +82,6 @@ export default function ProductCard({ product }: ProductCardProps) {
  <div className="mt-auto pt-3 border-t border-[#3d3d3d]">
  <div className="flex items-center justify-between">
  <div className="flex items-baseline gap-0.5 text-[#19C37D]">
- {currencySymbol === '₦' && <span className="text-lg font-bold">₦</span>}
  <span className="font-bold text-lg tracking-tight">{formattedPrice || '…'}</span>
  </div>
  {isInStock && (

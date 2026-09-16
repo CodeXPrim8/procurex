@@ -13,6 +13,8 @@ import Button from '@/components/ui/Button'
 import Input from '@/components/ui/Input'
 import Badge from '@/components/ui/Badge'
 import Modal from '@/components/ui/Modal'
+import PriceText from '@/components/PriceText'
+import { getCurrencyCode } from '@/lib/currency'
 import { 
  Package, Plus, Edit, Trash2, CheckCircle, AlertCircle, Building2, 
  Upload, Search, DollarSign, Box, TrendingUp, X, Image as ImageIcon,
@@ -36,6 +38,7 @@ export default function VendorDashboard() {
  const [viewMode, setViewMode] = useState<ViewMode>('grid')
  const [searchFilter, setSearchFilter] = useState('')
  const [activeTab, setActiveTab] = useState<'products' | 'info' | 'analytics'>('products')
+ const [currencyCode, setCurrencyCode] = useState('NGN')
  
  // Product search state
  const [productSearch, setProductSearch] = useState('')
@@ -184,6 +187,10 @@ export default function VendorDashboard() {
  setLoading(false)
  loadingRef.current = false
  }
+ }, [])
+
+ useEffect(() => {
+ void getCurrencyCode().then(setCurrencyCode)
  }, [])
 
  useEffect(() => {
@@ -695,7 +702,9 @@ export default function VendorDashboard() {
  <div className="flex items-center justify-between">
  <div>
  <p className="text-xs sm:text-sm font-medium text-[#b4b4b4] uppercase tracking-wide">Inventory Value</p>
- <p className="text-xl sm:text-3xl font-bold text-blue-600 mt-2 break-all">${totalValue.toFixed(2)}</p>
+ <p className="text-xl sm:text-3xl font-bold text-blue-600 mt-2 break-all">
+ <PriceText amount={products.reduce((sum, p) => sum + (p.price * p.stock_quantity), 0)} />
+ </p>
  <p className="text-xs text-[#8e8e8e] mt-1">Total stock value</p>
  </div>
  <div className="p-3 bg-blue-100 rounded-lg hidden sm:block">
@@ -708,7 +717,9 @@ export default function VendorDashboard() {
  <div className="flex items-center justify-between">
  <div>
  <p className="text-xs sm:text-sm font-medium text-[#b4b4b4] uppercase tracking-wide">Avg. Price</p>
- <p className="text-xl sm:text-3xl font-bold text-primary-600 mt-2 break-all">${averagePrice.toFixed(2)}</p>
+ <p className="text-xl sm:text-3xl font-bold text-primary-600 mt-2 break-all">
+ <PriceText amount={products.length ? products.reduce((sum, p) => sum + p.price, 0) / products.length : 0} />
+ </p>
  <p className="text-xs text-[#8e8e8e] mt-1">Per product</p>
  </div>
  <div className="p-2 sm:p-3 bg-[#171717] rounded-lg hidden sm:block">
@@ -910,7 +921,7 @@ export default function VendorDashboard() {
  <div>
  <p className="text-xs text-[#8e8e8e] mb-1">Price</p>
  <p className="text-2xl font-bold text-[#ececec]">
- ${(vp.price / 100).toFixed(2)}
+ <PriceText amount={vp.price} />
  </p>
  </div>
  <div>
@@ -996,7 +1007,7 @@ export default function VendorDashboard() {
  <div>
  <p className="text-xs text-[#8e8e8e] mb-1">Price</p>
  <p className="text-xl font-bold text-[#ececec]">
- ${(vp.price / 100).toFixed(2)}
+ <PriceText amount={vp.price} />
  </p>
  </div>
  <div>
@@ -1212,19 +1223,19 @@ export default function VendorDashboard() {
  <div className="flex justify-between">
  <span className="text-sm text-[#b4b4b4]">Lowest</span>
  <span className="font-semibold text-[#ececec]">
- ${(Math.min(...products.map(p => p.price / 100))).toFixed(2)}
+ <PriceText amount={Math.min(...products.map(p => p.price))} />
  </span>
  </div>
  <div className="flex justify-between">
  <span className="text-sm text-[#b4b4b4]">Average</span>
  <span className="font-semibold text-[#ececec]">
- ${averagePrice.toFixed(2)}
+ <PriceText amount={products.reduce((sum, p) => sum + p.price, 0) / products.length} />
  </span>
  </div>
  <div className="flex justify-between">
  <span className="text-sm text-[#b4b4b4]">Highest</span>
  <span className="font-semibold text-[#ececec]">
- ${(Math.max(...products.map(p => p.price / 100))).toFixed(2)}
+ <PriceText amount={Math.max(...products.map(p => p.price))} />
  </span>
  </div>
  </div>
@@ -1321,7 +1332,7 @@ export default function VendorDashboard() {
  }
  />
  <Input
- label="Price (USD)"
+ label={`Price (${currencyCode})`}
  type="number"
  min="0"
  step="0.01"
@@ -1329,7 +1340,7 @@ export default function VendorDashboard() {
  onChange={(e) =>
  setEditingProduct({ ...editingProduct, price: parseFloat(e.target.value) || 0 })
  }
- helperText={`Current: $${editingProduct.price.toFixed(2)}`}
+ helperText={`Buyers see this in ${currencyCode}`}
  />
  </div>
  </div>
@@ -1432,7 +1443,7 @@ export default function VendorDashboard() {
  }
  />
  <Input
- label="Price (USD)"
+ label={`Price (${currencyCode})`}
  type="number"
  min="0"
  step="0.01"
@@ -1441,7 +1452,7 @@ export default function VendorDashboard() {
  onChange={(e) =>
  setNewProduct({ ...newProduct, price: parseFloat(e.target.value) || 0 })
  }
- helperText={newProduct.price > 0 ? `$${newProduct.price.toFixed(2)}` : ''}
+ helperText={newProduct.price > 0 ? `Listed in ${currencyCode}` : ''}
  />
  </div>
  <div>
@@ -1560,7 +1571,7 @@ export default function VendorDashboard() {
  <p className="text-sm text-[#b4b4b4]">{product.category} • SKU: {product.sku}</p>
  {product.price && (
  <p className="text-sm font-medium text-primary-600 mt-1">
- ${(product.price / 100).toFixed(2)}
+ <PriceText amount={product.price} />
  </p>
  )}
  </div>
@@ -1581,7 +1592,7 @@ export default function VendorDashboard() {
  }
  />
  <Input
- label="Your Price (USD) *"
+ label={`Your Price (${currencyCode}) *`}
  type="number"
  min="0"
  step="0.01"
@@ -1590,7 +1601,7 @@ export default function VendorDashboard() {
  onChange={(e) =>
  setNewProduct({ ...newProduct, price: parseFloat(e.target.value) || 0 })
  }
- helperText={newProduct.price > 0 ? `$${newProduct.price.toFixed(2)}` : ''}
+ helperText={newProduct.price > 0 ? `Listed in ${currencyCode}` : ''}
  />
  </div>
  <Button 

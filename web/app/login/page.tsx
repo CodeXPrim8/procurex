@@ -50,8 +50,8 @@ export default function LoginPage() {
  setIsLoading(true)
 
  try {
- await authAPI.login(email, password)
- const supabaseUser = await authAPI.getMe()
+ const loginData = await authAPI.login(email, password)
+ const supabaseUser = loginData.user || (await authAPI.getMe())
  const metadata = supabaseUser?.user_metadata || {}
  let user = mapSupabaseUser(supabaseUser)
  setUser(user)

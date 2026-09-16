@@ -1,8 +1,10 @@
 'use client'
 
+import { useEffect, useState } from 'react'
 import Link from 'next/link'
 import { FileText, Calendar, User } from 'lucide-react'
 import Badge from './ui/Badge'
+import { formatPrice } from '@/lib/currency'
 
 interface QuotationCardProps {
  quotation: {
@@ -17,12 +19,18 @@ interface QuotationCardProps {
 }
 
 export default function QuotationCard({ quotation }: QuotationCardProps) {
+ const [totalLabel, setTotalLabel] = useState('')
  const statusColors = {
  draft: 'default',
  sent: 'info',
  accepted: 'success',
  rejected: 'danger',
  } as const
+
+ useEffect(() => {
+ const catalogAmount = Math.round(Number(quotation.total_amount) * 100)
+ void formatPrice(catalogAmount).then(setTotalLabel)
+ }, [quotation.total_amount])
 
  return (
  <Link href={`/quotations/${quotation.id}`}>
@@ -48,7 +56,7 @@ export default function QuotationCard({ quotation }: QuotationCardProps) {
  <div className="flex items-center justify-between pt-4 border-t border-[#3d3d3d]">
  <div>
  <p className="text-2xl font-bold text-[#ececec]">
- ${Number(quotation.total_amount).toFixed(2)}
+ {totalLabel || '…'}
  </p>
  <div className="flex items-center space-x-1 text-[#8e8e8e] text-sm mt-1">
  <Calendar className="w-4 h-4" />

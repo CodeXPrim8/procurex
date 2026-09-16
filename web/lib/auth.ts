@@ -83,28 +83,13 @@ export function useAuth() {
 
   useEffect(() => {
     let mounted = true
-    const applySessionUser = async (session: { access_token?: string; user?: SupabaseUser | null } | null) => {
+
+    const applySessionUser = (session: { access_token?: string; user?: SupabaseUser | null } | null) => {
       if (session?.access_token) {
         rememberAccessToken(session.access_token)
       }
       const mapped = mapSupabaseUser(session?.user ?? null)
-      if (!mapped) return
-      const metadata = session?.user?.user_metadata || {}
-      if (metadata.role !== 'vendor' && hasVendorAccountMarkers(metadata)) {
-        const restored = await persistVendorProfile({
-          company_name: metadata.company_name,
-          business_registration_number: metadata.business_registration_number,
-          domain: metadata.domain,
-          phone: metadata.phone,
-          address: metadata.address,
-        })
-        if (!mounted) return
-        setUser(restored || mapped)
-        return
-      }
-      const synced = await syncVendorRole(mapped)
-      if (!mounted) return
-      setUser(synced)
+      if (mapped && mounted) setUser(mapped)
     }
 
     const init = async () => {
@@ -114,17 +99,12 @@ export function useAuth() {
         if (error) {
           console.warn('getSession warning:', error.message)
         }
-        let session = data?.session
-        if (!session?.access_token && session?.refresh_token) {
-          const { data: refreshed } = await supabase.auth.refreshSession()
-          session = refreshed.session ?? session
+        if (data?.session?.user) {
+          applySessionUser(data.session)
         }
-        if (session?.user) {
-          await applySessionUser(session)
-        }
-        if (mounted) setAuthReady(true)
       } catch (error: any) {
         console.error('Failed to initialize auth:', error)
+      } finally {
         if (mounted) setAuthReady(true)
       }
     }
@@ -148,12 +128,6 @@ export function useAuth() {
     const onVisible = () => {
       if (document.visibilityState !== 'visible') return
       void supabase.auth.startAutoRefresh()
-      void supabase.auth.getSession().then(({ data }) => {
-        if (data.session?.user && mounted) {
-          rememberAccessToken(data.session.access_token)
-          setUser(mapSupabaseUser(data.session.user))
-        }
-      })
     }
     document.addEventListener('visibilitychange', onVisible)
 
@@ -179,4 +153,3 @@ export function useRequireAuth() {
 
   return { user, isAuthenticated }
 }
-

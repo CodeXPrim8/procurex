@@ -1,7 +1,7 @@
 'use client'
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { getSpeechRecognitionCtor, speakText, speechSupported, stopSpeaking } from './speech'
+import { getSpeechRecognitionCtor, speakText, speechSupported, stopSpeaking, unlockSpeech } from './speech'
 
 type VoiceChatOptions = {
   onFinalTranscript: (text: string) => void
@@ -20,7 +20,7 @@ export function useVoiceChat({ onFinalTranscript, onInterim, onError, busy }: Vo
   const voiceModeRef = useRef(false)
   const listeningRef = useRef(false)
   const busyRef = useRef(Boolean(busy))
-  const speakReplyRef = useRef(false)
+  const pendingReplySpeechRef = useRef(false)
   const mutedRef = useRef(false)
   const lastSpokenRef = useRef('')
   const onFinalRef = useRef(onFinalTranscript)
@@ -49,7 +49,7 @@ export function useVoiceChat({ onFinalTranscript, onInterim, onError, busy }: Vo
 
   const stopVoice = useCallback(() => {
     voiceModeRef.current = false
-    speakReplyRef.current = false
+    pendingReplySpeechRef.current = false
     setVoiceMode(false)
     stopListening()
     stopSpeaking()
@@ -63,6 +63,7 @@ export function useVoiceChat({ onFinalTranscript, onInterim, onError, busy }: Vo
       onErrorRef.current?.('Voice chat needs Chrome or Edge.')
       return
     }
+    unlockSpeech()
     stopSpeaking()
     setSpeaking(false)
     try {
@@ -87,7 +88,7 @@ export function useVoiceChat({ onFinalTranscript, onInterim, onError, busy }: Vo
       const live = (finalText || interim).trim()
       if (live) onInterimRef.current?.(live)
       if (finalText.trim()) {
-        speakReplyRef.current = false
+        pendingReplySpeechRef.current = true
         stopListening()
         onFinalRef.current(finalText.trim())
       }
@@ -135,9 +136,10 @@ export function useVoiceChat({ onFinalTranscript, onInterim, onError, busy }: Vo
       stopVoice()
       return
     }
+    unlockSpeech()
     setVoiceMode(true)
     voiceModeRef.current = true
-    speakReplyRef.current = false
+    pendingReplySpeechRef.current = false
     mutedRef.current = false
     startListening()
   }, [startListening, stopVoice])
@@ -153,10 +155,17 @@ export function useVoiceChat({ onFinalTranscript, onInterim, onError, busy }: Vo
   }, [voiceMode, busy, listening, speaking, startListening])
 
   const speakReply = useCallback(
-    (_content: string) => {
-      // Keep replies on screen. Users can tap Listen on a message if they want audio.
+    (content: string) => {
+      if (!pendingReplySpeechRef.current && !voiceModeRef.current) return
+      pendingReplySpeechRef.current = false
+      const clean = (content || '').trim()
+      if (!clean || clean === '...' || clean.startsWith('❌')) return
+      lastSpokenRef.current = clean
+      setSpeaking(true)
+      stopListening()
+      speakText(clean, () => setSpeaking(false))
     },
-    []
+    [stopListening]
   )
 
   const speakNow = useCallback((content: string) => {

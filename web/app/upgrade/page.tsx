@@ -1,14 +1,24 @@
 'use client'
 
+import { useEffect, useState } from 'react'
 import Link from 'next/link'
 import { CheckCircle2, Sparkles, Shield, ArrowUpRight, Headphones, Building2, Zap } from 'lucide-react'
 import Button from '@/components/ui/Button'
+import { formatFromUsd } from '@/lib/currency'
+
+function UsdPrice({ usd, fallback }: { usd: number; fallback: string }) {
+ const [text, setText] = useState(fallback)
+ useEffect(() => {
+ void formatFromUsd(usd).then(setText)
+ }, [usd, fallback])
+ return <>{text}</>
+}
 
 const plans = [
  {
  name: 'Starter',
  tag: 'Free forever',
- price: '$0',
+ usd: 0,
  billing: '/month',
  description: 'Test ProcureX with limited chats and catalog browsing.',
  features: [
@@ -25,7 +35,7 @@ const plans = [
  {
  name: 'Pro',
  tag: 'Most Popular',
- price: '$59',
+ usd: 59,
  billing: '/month',
  description: 'Unlock premium sourcing, live pricing, and workflow automation.',
  features: [
@@ -62,12 +72,14 @@ const addOns = [
  {
  title: 'Onboarding concierge',
  description: 'Live procurement expert to migrate your RFQs and vendor list.',
- price: '$499 one-time',
+ usd: 499,
+ suffix: ' one-time',
  },
  {
  title: 'Vendor verification pack',
  description: 'We vet up to 25 new vendors for compliance & bank checks.',
- price: '$999 / pack',
+ usd: 999,
+ suffix: ' / pack',
  },
  {
  title: 'ERP connector',
@@ -133,7 +145,13 @@ export default function UpgradePage() {
  <div className="flex items-center justify-between">
  <div>
  <p className="text-sm uppercase tracking-wide text-[#8e8e8e]">{plan.name}</p>
- <p className="text-3xl font-bold text-[#ececec] mt-2">{plan.price}</p>
+ <p className="text-3xl font-bold text-[#ececec] mt-2">
+ {'usd' in plan && typeof plan.usd === 'number' ? (
+ <UsdPrice usd={plan.usd} fallback={`$${plan.usd}`} />
+ ) : (
+ plan.price
+ )}
+ </p>
  <p className="text-sm text-[#8e8e8e]">{plan.billing}</p>
  </div>
  <span
@@ -234,7 +252,16 @@ export default function UpgradePage() {
  <div key={item.title} className="p-4 bg-[#212121] rounded-xl border border-[#2f2f2f]">
  <p className="font-semibold text-[#ececec]">{item.title}</p>
  <p className="text-sm text-[#b4b4b4] mt-2">{item.description}</p>
- <p className="text-sm text-[#19C37D] font-semibold mt-3">{item.price}</p>
+ <p className="text-sm text-[#19C37D] font-semibold mt-3">
+ {'usd' in item && typeof item.usd === 'number' ? (
+ <>
+ <UsdPrice usd={item.usd} fallback={`$${item.usd}`} />
+ {item.suffix || ''}
+ </>
+ ) : (
+ item.price
+ )}
+ </p>
  </div>
  ))}
  </div>
