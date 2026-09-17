@@ -182,16 +182,20 @@ export async function detectUserLocation(): Promise<string> {
   }
   if (!locationPromise) {
     locationPromise = (async () => {
-      const country =
-        (await countryFromIp()) ||
-        countryFromLocale() ||
-        countryFromTimezone() ||
-        'NG'
-      countryCache = country
+      const quick = countryFromTimezone() || countryFromLocale() || 'NG'
+      countryCache = quick
       if (typeof window !== 'undefined') {
-        window.localStorage.setItem(STORAGE_COUNTRY, country)
+        window.localStorage.setItem(STORAGE_COUNTRY, quick)
       }
-      return country
+      const fromIp = await countryFromIp()
+      if (fromIp) {
+        countryCache = fromIp
+        if (typeof window !== 'undefined') {
+          window.localStorage.setItem(STORAGE_COUNTRY, fromIp)
+        }
+        return fromIp
+      }
+      return quick
     })()
   }
   return locationPromise
@@ -231,6 +235,26 @@ async function loadUsdRates(): Promise<Record<string, number>> {
 
   ratesCache = { ...FALLBACK_USD_RATES }
   return ratesCache
+}
+
+export function getDisplayCurrencyNow() {
+  const country =
+    countryCache ||
+    (typeof window !== 'undefined' ? window.localStorage.getItem(STORAGE_COUNTRY) : null) ||
+    countryFromTimezone() ||
+    countryFromLocale() ||
+    'NG'
+  const currency = currencyForCountry(country)
+  const rates = ratesCache || FALLBACK_USD_RATES
+  const ngnPerUsd = rates.NGN || FALLBACK_USD_RATES.NGN
+  const localPerUsd = rates[currency] || 1
+  const localPerNgn = localPerUsd / ngnPerUsd
+  const locale = localeForCountry(country)
+  const symbol =
+    new Intl.NumberFormat(locale, { style: 'currency', currency, currencyDisplay: 'narrowSymbol' })
+      .formatToParts(0)
+      .find((part) => part.type === 'currency')?.value || currency
+  return { country, currency, symbol, locale, localPerNgn }
 }
 
 export async function getDisplayCurrency() {

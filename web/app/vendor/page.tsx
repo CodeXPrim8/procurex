@@ -14,6 +14,7 @@ import Input from '@/components/ui/Input'
 import Badge from '@/components/ui/Badge'
 import Modal from '@/components/ui/Modal'
 import PriceText from '@/components/PriceText'
+import ProcureXLoader from '@/components/ProcureXLoader'
 import { getCurrencyCode } from '@/lib/currency'
 import { 
  Package, Plus, Edit, Trash2, CheckCircle, AlertCircle, Building2, 
@@ -1541,8 +1542,12 @@ export default function VendorDashboard() {
  }
  }}
  />
- <Button onClick={handleSearchProducts} isLoading={searching}>
+ <Button onClick={handleSearchProducts} disabled={searching}>
+ {searching ? (
+ <ProcureXLoader size={24} label="Searching products" className="mr-2" />
+ ) : (
  <Search className="w-4 h-4 mr-2" />
+ )}
  Search
  </Button>
  </div>
@@ -1618,6 +1623,12 @@ export default function VendorDashboard() {
  <Plus className="w-4 h-4 mr-2" />
  Add Product to Catalog
  </Button>
+ </div>
+ )}
+
+ {searching && searchResults.length === 0 && (
+ <div className="flex justify-center py-6">
+ <ProcureXLoader size={24} label="Searching products" />
  </div>
  )}
 

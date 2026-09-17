@@ -1,0 +1,46 @@
+.procurex-loader {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 0;
+  position: relative;
+}
+
+.procurex-loader__mark {
+  display: block;
+  object-fit: contain;
+  transform-origin: center center;
+  animation: procurex-loader-pulse 1.6s ease-in-out infinite;
+}
+
+.procurex-loader__status {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+@keyframes procurex-loader-pulse {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.72;
+    transform: scale(0.96);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .procurex-loader__mark {
+    animation: none;
+    opacity: 1;
+    transform: none;
+  }
+}

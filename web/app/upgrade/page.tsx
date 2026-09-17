@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react'
 import Link from 'next/link'
 import { CheckCircle2, Sparkles, Shield, ArrowUpRight, Headphones, Building2, Zap } from 'lucide-react'
 import Button from '@/components/ui/Button'
+import Logo from '@/components/Logo'
 import { formatFromUsd } from '@/lib/currency'
 
 function UsdPrice({ usd, fallback }: { usd: number; fallback: string }) {
@@ -107,6 +108,9 @@ export default function UpgradePage() {
  return (
  <div className="py-8 sm:py-12 lg:py-16 space-y-12 sm:space-y-16">
  <section className="text-center space-y-6">
+ <div className="flex justify-center">
+ <Logo className="h-9 sm:h-10" />
+ </div>
  <span className="inline-flex items-center gap-2 px-4 py-1 rounded-full border border-primary-200 text-[#19C37D] bg-[#171717] text-sm font-semibold">
  <Sparkles className="w-4 h-4" />
  Premium procurement workspace

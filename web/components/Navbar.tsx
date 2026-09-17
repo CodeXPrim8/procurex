@@ -5,6 +5,7 @@ import Link from 'next/link'
 import { usePathname, useRouter } from 'next/navigation'
 import { Menu, X, User, LogOut, MessageSquare, FileText, Package, Star } from 'lucide-react'
 import { useStore } from '@/lib/store'
+import Logo from '@/components/Logo'
 
 export default function Navbar() {
  const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false)
@@ -38,9 +39,8 @@ export default function Navbar() {
  <nav className="bg-[#171717] border-[#2f2f2f] border-b sticky top-0 z-40">
  <div className="max-w-7xl mx-auto px-3 sm:px-6 lg:px-8">
  <div className="flex items-center h-14 sm:h-16 gap-2">
- <Link href={user?.role === 'vendor' ? '/vendor' : '/chat'} className="flex items-center min-w-0 space-x-2">
- <Package className="w-7 h-7 sm:w-8 sm:h-8 text-[#19C37D] flex-shrink-0" />
- <span className="text-lg sm:text-xl font-bold text-[#ececec] truncate">ProcureX</span>
+ <Link href={user?.role === 'vendor' ? '/vendor' : '/chat'} className="flex items-center min-w-0">
+ <Logo className="h-7 sm:h-8" />
  </Link>
 
  <div className="hidden md:flex md:items-center md:space-x-4 md:ml-6">

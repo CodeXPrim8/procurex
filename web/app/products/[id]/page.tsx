@@ -7,6 +7,7 @@ import { productAPI, quotationAPI } from '@/lib/api'
 import { showToast } from '@/lib/toast'
 import Button from '@/components/ui/Button'
 import Badge from '@/components/ui/Badge'
+import ProcureXLoader from '@/components/ProcureXLoader'
 import { useRequireAuth } from '@/lib/auth'
 import { formatPrice } from '@/lib/currency'
 import { resolveMediaUrl, productImageList } from '@/lib/media'
@@ -42,6 +43,7 @@ export default function ProductDetailPage() {
  const [product, setProduct] = useState<any>(null)
  const [alternatives, setAlternatives] = useState<any[]>([])
  const [loading, setLoading] = useState(true)
+ const [quoting, setQuoting] = useState(false)
  const [quantity, setQuantity] = useState(1)
  const [formattedPrice, setFormattedPrice] = useState('')
  const [activeImage, setActiveImage] = useState(0)
@@ -74,8 +76,9 @@ export default function ProductDetailPage() {
  }
 
  const handleAddToQuotation = async () => {
- if (!product) return
+ if (!product || quoting) return
 
+ setQuoting(true)
  try {
  const quotationData = {
  customer_name: user?.full_name || 'Customer',
@@ -96,14 +99,15 @@ export default function ProductDetailPage() {
  router.push(`/quotations/${quotation.id}`)
  } catch (error: any) {
  showToast(error.response?.data?.detail || 'Failed to create quotation', 'error')
+ } finally {
+ setQuoting(false)
  }
  }
 
  if (loading) {
  return (
- <div className="text-center py-12">
- <div className="inline-block animate-spin rounded-full h-8 w-8 border-b-2 border-primary-600"></div>
- <p className="mt-4 text-[#b4b4b4]">Loading product...</p>
+ <div className="flex justify-center py-12">
+ <ProcureXLoader size={56} label="Loading product" />
  </div>
  )
  }
@@ -227,8 +231,13 @@ export default function ProductDetailPage() {
  onClick={handleAddToQuotation}
  className="w-full"
  size="lg"
+ disabled={quoting}
  >
+ {quoting ? (
+ <ProcureXLoader size={24} label="Creating quotation" className="mr-2" />
+ ) : (
  <ShoppingCart className="w-5 h-5 mr-2" />
+ )}
  Add to Quotation
  </Button>
  </div>

@@ -10,6 +10,7 @@ import ProductGrid from '@/components/ProductGrid'
 import Input from '@/components/ui/Input'
 import Button from '@/components/ui/Button'
 import Badge from '@/components/ui/Badge'
+import ProcureXLoader from '@/components/ProcureXLoader'
 import { PRODUCT_CATEGORIES } from '@/lib/productCategories'
 
 export default function ProductsPage() {
@@ -105,7 +106,8 @@ export default function ProductsPage() {
  />
  </div>
  </div>
- <Button type="submit" isLoading={loading}>
+ <Button type="submit" disabled={loading}>
+ {loading ? <ProcureXLoader size={24} label="Searching products" className="mr-2" /> : null}
  Search
  </Button>
  </div>
@@ -180,10 +182,9 @@ export default function ProductsPage() {
  </form>
  </div>
 
- {loading ? (
- <div className="text-center py-12">
- <div className="inline-block animate-spin rounded-full h-8 w-8 border-b-2 border-primary-600"></div>
- <p className="mt-4 text-[#b4b4b4]">Loading products...</p>
+ {loading && products.length === 0 ? (
+ <div className="flex justify-center py-12">
+ <ProcureXLoader size={56} label="Searching products" />
  </div>
  ) : (
  <ProductGrid

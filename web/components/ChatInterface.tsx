@@ -6,6 +6,7 @@ import { useStore } from '@/lib/store'
 import { chatAPI } from '@/lib/api'
 import ChatMessage from './ChatMessage'
 import ProductCard from './ProductCard'
+import Logo from './Logo'
 import { supabase } from '@/lib/supabaseClient'
 import { getDisplayCurrency } from '@/lib/currency'
 
@@ -170,6 +171,9 @@ export default function ChatInterface() {
  <div className="flex-1 overflow-y-auto p-4 space-y-4">
  {currentSession?.messages.length === 0 && (
  <div className="text-center text-[#8e8e8e] mt-8">
+ <div className="flex justify-center mb-3">
+ <Logo className="h-8" />
+ </div>
  <p className="text-lg mb-2">Welcome to ProcureX</p>
  <p className="text-sm">Ask me about IT products, prices, and availability!</p>
  </div>

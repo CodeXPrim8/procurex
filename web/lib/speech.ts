@@ -20,9 +20,18 @@ export function textForSpeech(raw: string) {
 }
 
 let speakToken = 0
+let streamQueue: string[] = []
+let streamPlaying = false
+let streamEnded = false
+let streamOnEnd: (() => void) | undefined
+let streamToken = 0
 
 export function stopSpeaking() {
   speakToken += 1
+  streamQueue = []
+  streamPlaying = false
+  streamEnded = true
+  streamOnEnd = undefined
   if (typeof window === 'undefined' || !window.speechSynthesis) return
   window.speechSynthesis.cancel()
 }
@@ -38,6 +47,13 @@ export function unlockSpeech() {
     warm.lang = navigator.language || 'en-US'
     window.speechSynthesis.speak(warm)
     window.speechSynthesis.resume()
+    window.setTimeout(() => {
+      try {
+        window.speechSynthesis.cancel()
+      } catch {
+        // ignore
+      }
+    }, 0)
   } catch {
     // ignore
   }
@@ -60,7 +76,7 @@ function pickVoice(): SpeechSynthesisVoice | undefined {
   )
 }
 
-function chunkForSpeech(text: string, maxLen = 220): string[] {
+function chunkForSpeech(text: string, maxLen = 180): string[] {
   const sentences = text.match(/[^.!?]+[.!?]+|[^.!?]+$/g) || [text]
   const chunks: string[] = []
   let buf = ''
@@ -78,20 +94,66 @@ function chunkForSpeech(text: string, maxLen = 220): string[] {
   return chunks
 }
 
-function whenVoicesReady(run: () => void) {
-  if (window.speechSynthesis.getVoices().length) {
-    run()
+function speakUtterance(text: string, onEnd: () => void) {
+  const utterance = new SpeechSynthesisUtterance(text)
+  const preferred = pickVoice()
+  utterance.rate = 1.12
+  utterance.pitch = 1
+  utterance.lang = preferred?.lang || navigator.language || 'en-US'
+  if (preferred) utterance.voice = preferred
+  utterance.onend = onEnd
+  utterance.onerror = onEnd
+  window.speechSynthesis.speak(utterance)
+  try {
+    window.speechSynthesis.resume()
+  } catch {
+    // ignore
+  }
+}
+
+function playStreamNext() {
+  if (streamToken !== speakToken) return
+  const next = streamQueue.shift()
+  if (!next) {
+    streamPlaying = false
+    if (streamEnded) {
+      const done = streamOnEnd
+      streamOnEnd = undefined
+      done?.()
+    }
     return
   }
-  const onChange = () => {
-    window.speechSynthesis.removeEventListener('voiceschanged', onChange)
-    run()
+  streamPlaying = true
+  speakUtterance(next, () => {
+    if (streamToken !== speakToken) return
+    playStreamNext()
+  })
+}
+
+export function beginSpokenReply(onEnd?: () => void) {
+  stopSpeaking()
+  streamToken = speakToken
+  streamQueue = []
+  streamPlaying = false
+  streamEnded = false
+  streamOnEnd = onEnd
+}
+
+export function pushSpokenText(raw: string) {
+  const text = textForSpeech(raw)
+  if (!text || streamToken !== speakToken) return
+  streamQueue.push(text)
+  if (!streamPlaying) playStreamNext()
+}
+
+export function endSpokenReply() {
+  if (streamToken !== speakToken) return
+  streamEnded = true
+  if (!streamPlaying && streamQueue.length === 0) {
+    const done = streamOnEnd
+    streamOnEnd = undefined
+    done?.()
   }
-  window.speechSynthesis.addEventListener('voiceschanged', onChange)
-  window.setTimeout(() => {
-    window.speechSynthesis.removeEventListener('voiceschanged', onChange)
-    run()
-  }, 500)
 }
 
 export function speakText(raw: string, onEnd?: () => void) {
@@ -105,43 +167,9 @@ export function speakText(raw: string, onEnd?: () => void) {
     return
   }
 
-  const token = ++speakToken
-  window.speechSynthesis.cancel()
-
-  const finish = () => {
-    if (token !== speakToken) return
-    onEnd?.()
+  beginSpokenReply(onEnd)
+  for (const chunk of chunkForSpeech(text)) {
+    pushSpokenText(chunk)
   }
-
-  const start = () => {
-    if (token !== speakToken) return
-    const chunks = chunkForSpeech(text)
-    const preferred = pickVoice()
-    const lang = preferred?.lang || navigator.language || 'en-US'
-
-    const speakChunk = (index: number) => {
-      if (token !== speakToken) return
-      if (index >= chunks.length) {
-        finish()
-        return
-      }
-      const utterance = new SpeechSynthesisUtterance(chunks[index])
-      utterance.rate = 1.04
-      utterance.pitch = 1
-      utterance.lang = lang
-      if (preferred) utterance.voice = preferred
-      utterance.onend = () => speakChunk(index + 1)
-      utterance.onerror = () => finish()
-      window.speechSynthesis.speak(utterance)
-      try {
-        window.speechSynthesis.resume()
-      } catch {
-        // ignore
-      }
-    }
-
-    window.setTimeout(() => speakChunk(0), 40)
-  }
-
-  whenVoicesReady(start)
+  endSpokenReply()
 }

@@ -2,7 +2,8 @@
 
 import { useState, type ReactNode } from 'react'
 import ReactMarkdown from 'react-markdown'
-import { User, MessageSquare, Volume2, Copy, Share2, Check } from 'lucide-react'
+import { User, Volume2, Copy, Share2, Check } from 'lucide-react'
+import Logo from '@/components/Logo'
 
 interface ChatMessageProps {
  message: {
@@ -71,8 +72,8 @@ export default function ChatMessage({ message, onSpeak }: ChatMessageProps) {
  <User className="w-5 h-5 text-white" />
  </div>
  ) : (
- <div className="w-8 h-8 rounded-full bg-[#19C37D] flex items-center justify-center">
- <MessageSquare className="w-5 h-5 text-white" />
+ <div className="w-8 h-8 rounded-full bg-[#111111] flex items-center justify-center overflow-hidden p-1.5">
+ <Logo variant="mark" className="h-5 w-5" />
  </div>
  )}
  </div>

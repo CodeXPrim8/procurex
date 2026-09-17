@@ -77,19 +77,36 @@ function mapSessionRow(row: any, messages: CloudMessage[] = []): CloudSession {
   }
 }
 
+const PAGE_SIZE = 1000
+
+async function fetchAllRows<T>(
+  query: (from: number, to: number) => PromiseLike<{ data: T[] | null; error: any }>
+): Promise<T[]> {
+  const all: T[] = []
+  let from = 0
+  while (true) {
+    const { data, error } = await withTimeout(query(from, from + PAGE_SIZE - 1), 12000)
+    if (error) throw error
+    const rows = data || []
+    all.push(...rows)
+    if (rows.length < PAGE_SIZE) break
+    from += PAGE_SIZE
+  }
+  return all
+}
+
 export async function listCloudSessions(): Promise<CloudSession[]> {
   const userId = await currentUserId()
   if (!userId) return []
-  const { data, error } = await withTimeout(
+  const data = await fetchAllRows<any>((from, to) =>
     supabase
       .from(SESSION_TABLE)
       .select('id, title, created_at, updated_at, legacy_id')
       .eq('user_id', userId)
-      .order('updated_at', { ascending: false }),
-    8000
+      .order('updated_at', { ascending: false })
+      .range(from, to)
   )
-  if (error) throw error
-  return (data || []).map((row) => mapSessionRow(row))
+  return data.map((row) => mapSessionRow(row))
 }
 
 export async function getCloudSession(sessionId: string): Promise<CloudSession | null> {
@@ -103,15 +120,17 @@ export async function getCloudSession(sessionId: string): Promise<CloudSession |
     .maybeSingle()
   if (error) throw error
   if (!session) return null
-  const { data: messages, error: messageError } = await supabase
-    .from(MESSAGE_TABLE)
-    .select('role, content, created_at')
-    .eq('session_id', sessionId)
-    .order('created_at', { ascending: true })
-  if (messageError) throw messageError
+  const messages = await fetchAllRows<any>((from, to) =>
+    supabase
+      .from(MESSAGE_TABLE)
+      .select('role, content, created_at')
+      .eq('session_id', sessionId)
+      .order('created_at', { ascending: true })
+      .range(from, to)
+  )
   return mapSessionRow(
     session,
-    (messages || []).map((item) => ({
+    messages.map((item) => ({
       role: item.role,
       content: item.content,
       created_at: item.created_at,
@@ -186,36 +205,77 @@ export async function importApiSessionToCloud(session: {
     .eq('legacy_id', session.id)
     .maybeSingle()
   if (existing) {
-    const full = await getCloudSession(existing.id)
-    return full || mapSessionRow(existing)
+    return appendMissingMessages(existing, session.messages || [])
   }
   const created = await createCloudSession(session.title || 'New chat', session.id)
-  const messages = session.messages || []
-  if (messages.length) {
+  return appendMissingMessages(created, session.messages || [], {
+    title: session.title || created.title,
+    created_at: session.created_at || created.created_at,
+    updated_at: session.updated_at || created.updated_at,
+  })
+}
+
+async function appendMissingMessages(
+  session: { id: string; title?: string; created_at?: string; updated_at?: string; legacy_id?: number | null },
+  incoming: CloudMessage[],
+  meta?: { title?: string; created_at?: string; updated_at?: string }
+): Promise<CloudSession> {
+  const full = (await getCloudSession(session.id)) || mapSessionRow(session)
+  const have = full.messages?.length || 0
+  const extra = incoming.slice(have)
+  if (extra.length) {
     const { error } = await supabase.from(MESSAGE_TABLE).insert(
-      messages.map((message) => ({
-        session_id: created.id,
+      extra.map((message) => ({
+        session_id: session.id,
         role: message.role,
         content: message.content,
       }))
     )
     if (error) throw error
+  }
+  const title = meta?.title || full.title
+  const updated_at = meta?.updated_at || (extra.length ? new Date().toISOString() : full.updated_at)
+  if (extra.length || (title && title !== full.title)) {
     await supabase
       .from(SESSION_TABLE)
-      .update({
-        updated_at: session.updated_at || new Date().toISOString(),
-        title: session.title || created.title,
-      })
-      .eq('id', created.id)
+      .update({ updated_at, title })
+      .eq('id', session.id)
   }
   return {
-    ...created,
+    ...full,
+    title,
+    messages: have >= incoming.length ? full.messages : incoming,
+    created_at: meta?.created_at || full.created_at,
+    updated_at,
+    legacy_id: full.legacy_id ?? session.legacy_id ?? null,
+  }
+}
+
+export async function importLocalChatToCloud(session: {
+  id?: number | string
+  title?: string
+  created_at?: string
+  updated_at?: string
+  messages?: CloudMessage[]
+}): Promise<CloudSession> {
+  const numericId = typeof session.id === 'number' ? session.id : Number(session.id)
+  const legacyId =
+    Number.isFinite(numericId) && numericId > 0 && !isCloudSessionId(session.id) ? numericId : null
+  if (legacyId != null) {
+    return importApiSessionToCloud({
+      id: legacyId,
+      title: session.title,
+      created_at: session.created_at,
+      updated_at: session.updated_at,
+      messages: session.messages,
+    })
+  }
+  const created = await createCloudSession(session.title || 'New chat')
+  return appendMissingMessages(created, session.messages || [], {
     title: session.title || created.title,
-    messages,
     created_at: session.created_at || created.created_at,
     updated_at: session.updated_at || created.updated_at,
-    legacy_id: session.id,
-  }
+  })
 }
 
 export function subscribeCloudChats(userId: string, onChange: () => void) {

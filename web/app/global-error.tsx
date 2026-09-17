@@ -20,6 +20,7 @@ export default function GlobalError({
  <body>
  <div className="min-h-screen flex items-center justify-center bg-[#212121] px-4">
  <div className="max-w-md w-full bg-[#2f2f2f] rounded-lg shadow-lg p-8 text-center">
+ <img src="/images/procurex-logo.png" alt="ProcureX" className="h-8 w-auto mx-auto mb-4" />
  <AlertTriangle className="w-16 h-16 text-red-500 mx-auto mb-4" />
  <h1 className="text-2xl font-bold text-[#ececec] mb-2">Application Error</h1>
  <p className="text-[#b4b4b4] mb-6">

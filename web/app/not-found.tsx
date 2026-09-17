@@ -1,11 +1,15 @@
 import Link from 'next/link'
 import { FileQuestion } from 'lucide-react'
 import Button from '@/components/ui/Button'
+import Logo from '@/components/Logo'
 
 export default function NotFound() {
  return (
  <div className="min-h-screen flex items-center justify-center bg-[#212121] px-4">
  <div className="max-w-md w-full bg-[#2f2f2f] rounded-lg shadow-lg p-8 text-center">
+ <div className="flex justify-center mb-4">
+ <Logo className="h-8" />
+ </div>
  <FileQuestion className="w-16 h-16 text-gray-400 mx-auto mb-4" />
  <h1 className="text-3xl font-bold text-[#ececec] mb-2">404</h1>
  <h2 className="text-xl font-semibold text-[#b4b4b4] mb-4">Page Not Found</h2>

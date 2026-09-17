@@ -4,11 +4,9 @@ import { useState, useEffect, useRef } from 'react'
 import {
   MessageSquare,
   Send,
-  Loader2,
   Plus,
   ShoppingCart,
   FileText,
-  Package,
   Search,
   BookOpen,
   Folder,
@@ -34,12 +32,14 @@ import { useStore } from '@/lib/store'
 import { chatAPI } from '@/lib/api'
 import { useAuth } from '@/lib/auth'
 import ChatMessage from '@/components/ChatMessage'
+import Logo from '@/components/Logo'
+import ProcureXLoader from '@/components/ProcureXLoader'
 import ProductCard from '@/components/ProductCard'
 import Button from '@/components/ui/Button'
 import { showToast } from '@/lib/toast'
 import { getAccessToken } from '@/lib/sessionToken'
 import { naturalChatTitle } from '@/lib/chatTitle'
-import { formatPriceRange, getDisplayCurrency, formatFromUsd } from '@/lib/currency'
+import { getDisplayCurrencyNow, formatFromUsd } from '@/lib/currency'
 import { useVoiceChat } from '@/lib/useVoiceChat'
 import {
   cloudChatsReady,
@@ -53,6 +53,11 @@ import {
 } from '@/lib/cloudChats'
 
 const LAST_CHAT_KEY = 'procurex_last_chat_id'
+const GUEST_CHATS_KEY = 'temp_chat_sessions'
+
+function accountChatsKey(userId: string) {
+  return `procurex_account_chats_${userId}`
+}
 
 function isBlankChat(session: any) {
   const title = (session?.title || 'New chat').trim().toLowerCase()
@@ -61,15 +66,96 @@ function isBlankChat(session: any) {
   return untitled && (!messages || messages.length === 0)
 }
 
+function readStoredSessions(key: string): any[] {
+  if (typeof window === 'undefined') return []
+  try {
+    const raw = localStorage.getItem(key)
+    const parsed = raw ? JSON.parse(raw) : []
+    return Array.isArray(parsed) ? parsed : []
+  } catch {
+    return []
+  }
+}
+
+function writeStoredSessions(key: string, sessions: any[]) {
+  if (typeof window === 'undefined') return
+  try {
+    localStorage.setItem(key, JSON.stringify(sessions))
+  } catch {
+    try {
+      const slim = sessions.map((session) => ({
+        ...session,
+        messages: (session.messages || []).slice(-120),
+      }))
+      localStorage.setItem(key, JSON.stringify(slim))
+    } catch {
+      // Storage is full; keep chats in memory.
+    }
+  }
+}
+
 function persistGuestSessions(updatedSession: any) {
-  const localSessions = localStorage.getItem('temp_chat_sessions')
-  const stored = localSessions ? JSON.parse(localSessions) : []
-  const nextList = [
-    updatedSession,
-    ...stored.filter((item: any) => item.id !== updatedSession.id),
-  ]
-  localStorage.setItem('temp_chat_sessions', JSON.stringify(nextList))
+  const nextList = mergeSessionLists([updatedSession], readStoredSessions(GUEST_CHATS_KEY))
+  writeStoredSessions(GUEST_CHATS_KEY, nextList)
   return nextList
+}
+
+function pickLongerMessages(a?: any[], b?: any[]) {
+  const left = a || []
+  const right = b || []
+  return left.length >= right.length ? left : right
+}
+
+function newerTimestamp(a?: string, b?: string) {
+  const ta = new Date(a || 0).getTime()
+  const tb = new Date(b || 0).getTime()
+  if (tb > ta) return b
+  return a
+}
+
+function chatTimeGroup(session: any) {
+  const stamp = new Date(session?.updated_at || session?.created_at || 0)
+  const time = stamp.getTime()
+  if (!Number.isFinite(time) || time <= 0) return 'Older'
+  const startOfToday = new Date()
+  startOfToday.setHours(0, 0, 0, 0)
+  const today = startOfToday.getTime()
+  if (time >= today) return 'Today'
+  if (time >= today - 86400000) return 'Yesterday'
+  if (time >= today - 7 * 86400000) return 'Previous 7 days'
+  if (time >= today - 30 * 86400000) return 'Previous 30 days'
+  return stamp.toLocaleString(undefined, { month: 'long', year: 'numeric' })
+}
+
+function groupSessions(sessions: any[]) {
+  const groups: { label: string; items: any[] }[] = []
+  for (const session of sessions) {
+    const label = chatTimeGroup(session)
+    const last = groups[groups.length - 1]
+    if (last && last.label === label) last.items.push(session)
+    else groups.push({ label, items: [session] })
+  }
+  return groups
+}
+
+function sessionMatchesQuery(session: any, query: string, label: string) {
+  const needle = query.trim().toLowerCase()
+  if (!needle) return true
+  if (label.toLowerCase().includes(needle)) return true
+  return (session?.messages || []).some((message: any) =>
+    String(message?.content || '').toLowerCase().includes(needle)
+  )
+}
+
+function catalogPriceRangeLabel(minNgn = 30000, maxNgn = 80000) {
+  const { currency, locale, localPerNgn } = getDisplayCurrencyNow()
+  const fmt = (amount: number) =>
+    new Intl.NumberFormat(locale, {
+      style: 'currency',
+      currency,
+      maximumFractionDigits: 0,
+    }).format(amount * localPerNgn)
+  return `${fmt(minNgn)}–${fmt(maxNgn)}`
 }
 
 function makeLocalSession() {
@@ -110,31 +196,32 @@ function readLastChatId(): string | number | null {
 
 function mergeSessionLists(serverList: any[], localList: any[]) {
   const byId = new Map<string, any>()
-  for (const item of serverList) {
-    if (item?.id == null) continue
-    byId.set(String(item.id), { ...item, messages: item.messages || [] })
-  }
-  for (const item of localList) {
-    if (item?.id == null) continue
+  const ingest = (item: any) => {
+    if (item?.id == null) return
     const key = String(item.id)
     const existing = byId.get(key)
     if (!existing) {
-      byId.set(key, item)
-      continue
+      byId.set(key, { ...item, messages: item.messages || [] })
+      return
     }
     const existingTitle = (existing.title || '').trim()
-    const localTitle = (item.title || '').trim()
-    const preferLocal =
-      localTitle &&
-      localTitle.toLowerCase() !== 'new chat' &&
+    const incomingTitle = (item.title || '').trim()
+    const preferIncoming =
+      incomingTitle &&
+      incomingTitle.toLowerCase() !== 'new chat' &&
       (!existingTitle || existingTitle.toLowerCase() === 'new chat')
     byId.set(key, {
       ...existing,
       ...item,
-      title: preferLocal ? localTitle : existingTitle || localTitle,
-      messages: existing.messages?.length ? existing.messages : item.messages || [],
+      title: preferIncoming ? incomingTitle : existingTitle || incomingTitle,
+      messages: pickLongerMessages(existing.messages, item.messages),
+      created_at: existing.created_at || item.created_at,
+      updated_at: newerTimestamp(existing.updated_at, item.updated_at) || existing.updated_at || item.updated_at,
+      legacy_id: item.legacy_id ?? existing.legacy_id,
     })
   }
+  for (const item of serverList) ingest(item)
+  for (const item of localList) ingest(item)
   return Array.from(byId.values()).sort((a, b) => {
     const tb = new Date(b.updated_at || b.created_at || 0).getTime()
     const ta = new Date(a.updated_at || a.created_at || 0).getTime()
@@ -193,6 +280,10 @@ export default function ChatPage() {
   })
   const speakReplyFn = useRef(voice.speakReply)
   speakReplyFn.current = voice.speakReply
+  const feedSpokenFn = useRef(voice.feedSpokenReply)
+  feedSpokenFn.current = voice.feedSpokenReply
+  const finishSpokenFn = useRef(voice.finishSpokenReply)
+  finishSpokenFn.current = voice.finishSpokenReply
 
   // Check backend health with better error handling
   const checkBackendHealth = async (): Promise<boolean> => {
@@ -944,6 +1035,9 @@ export default function ChatPage() {
             return [...updated, { role: 'assistant' as const, content: data.content }]
           }
         })
+        if (liveAssistantRef.current && liveAssistantRef.current !== '...') {
+          feedSpokenFn.current(liveAssistantRef.current)
+        }
       } else if (data.type === 'title') {
         if (data.title && wsSessionIdRef.current) {
           const sid = wsSessionIdRef.current
@@ -989,7 +1083,7 @@ export default function ChatPage() {
           )
         }
         if (liveAssistantRef.current && liveAssistantRef.current !== '...') {
-          speakReplyFn.current(liveAssistantRef.current)
+          finishSpokenFn.current(liveAssistantRef.current)
         }
         if (sid && isServerSession(sid) && !data.title) {
           chatAPI
@@ -1147,6 +1241,7 @@ export default function ChatPage() {
   }
 
   const handleSend = async (preset?: string) => {
+    voice.stopCapture()
     if (isLoading || sendLockRef.current) return
     const userMessage = (typeof preset === 'string' ? preset : input || '').trim()
     if (!userMessage) return
@@ -1260,7 +1355,6 @@ export default function ChatPage() {
         setSessions(persistGuestSessions(updatedSession))
 
       // Generate helpful AI-like response based on query
-        setTimeout(() => {
         let response = ""
         const lowerMessage = userMessage.toLowerCase().trim()
         const conversationHistory = session?.messages || []
@@ -1300,7 +1394,6 @@ export default function ChatPage() {
           
           setIsLoading(false)
           speakReplyFn.current(response)
-      }, 500)
       return
     }
 
@@ -1310,11 +1403,10 @@ export default function ChatPage() {
       const connected = wsId ? await connectWebSocket(wsId) : false
       
       if (connected && wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-        // Wait a bit for WebSocket to be fully ready
-        await new Promise(resolve => setTimeout(resolve, 100))
-        const money = await getDisplayCurrency()
+        const money = getDisplayCurrencyNow()
         wsRef.current.send(JSON.stringify({
           message: userMessage,
+          voice: Boolean(voice.voiceMode),
           currency: money.currency,
           currency_symbol: money.symbol,
           country: money.country,
@@ -1336,7 +1428,7 @@ export default function ChatPage() {
       try {
         let assistantResponse = ""
         const lowerMessage = userMessage.toLowerCase().trim()
-        const priceRange = await formatPriceRange(30000, 80000)
+        const priceRange = catalogPriceRangeLabel()
         
         // Get conversation context
         const conversationHistory = session?.messages || []
@@ -1392,22 +1484,7 @@ export default function ChatPage() {
           }
         }
 
-        // Simulate streaming by adding characters one by one
-        const assistantMsg = { role: 'assistant' as const, content: '' }
-        addMessage(assistantMsg)
-        
-        for (let i = 0; i < assistantResponse.length; i++) {
-          await new Promise(resolve => setTimeout(resolve, 20))
-          setMessages((prev) => {
-            const updated = [...prev]
-            const lastMsg = updated[updated.length - 1]
-            if (lastMsg && lastMsg.role === 'assistant') {
-              lastMsg.content = assistantResponse.substring(0, i + 1)
-              return updated
-            }
-            return updated
-          })
-        }
+        addMessage({ role: 'assistant' as const, content: assistantResponse })
 
         setIsLoading(false)
         speakReplyFn.current(assistantResponse)
@@ -1426,7 +1503,7 @@ export default function ChatPage() {
         const lowerMessage = userMessage.toLowerCase().trim()
         const conversationHistory = session?.messages || []
         const lastFewMessages = conversationHistory.slice(-4).map(m => m.content.toLowerCase())
-        const priceRange = await formatPriceRange(30000, 80000)
+        const priceRange = catalogPriceRangeLabel()
         
         // Use same logic as above
         if (/^(hello|hi|hey|good morning|good afternoon|good evening|greetings|howdy)$/i.test(lowerMessage) || 
@@ -1458,22 +1535,7 @@ export default function ChatPage() {
         }
         }
 
-        // Simulate streaming
-        const assistantMsg = { role: 'assistant' as const, content: '' }
-        addMessage(assistantMsg)
-        
-        for (let i = 0; i < assistantResponse.length; i++) {
-          await new Promise(resolve => setTimeout(resolve, 20))
-          setMessages((prev) => {
-            const updated = [...prev]
-            const lastMsg = updated[updated.length - 1]
-            if (lastMsg && lastMsg.role === 'assistant') {
-              lastMsg.content = assistantResponse.substring(0, i + 1)
-              return updated
-            }
-            return updated
-          })
-        }
+        addMessage({ role: 'assistant' as const, content: assistantResponse })
 
         setIsLoading(false)
         speakReplyFn.current(assistantResponse)
@@ -1572,6 +1634,13 @@ export default function ChatPage() {
       })()
     : 0
   const remainingChats = Math.max(0, chatLimit - localSessionsCount)
+  const lastChatMessage = currentSession?.messages[currentSession.messages.length - 1]
+  const waitingForReply =
+    isLoading &&
+    (!lastChatMessage ||
+      lastChatMessage.role !== 'assistant' ||
+      !lastChatMessage.content ||
+      lastChatMessage.content === '...')
   const hasReachedLimit = clientReady && !isAuthenticated && localSessionsCount >= chatLimit
 
   return (
@@ -1587,8 +1656,11 @@ export default function ChatPage() {
 
       {/* Sidebar - Navigation & Chat History (ChatGPT style) */}
       <div className={`flex flex-col h-full bg-black md:bg-[#171717] border-r border-[#2f2f2f] overflow-hidden z-50 w-72 max-w-[85vw] fixed inset-y-0 left-0 md:relative md:max-w-none md:w-64 md:flex-shrink-0 transition-transform duration-300 ${showSidebar ? 'translate-x-0' : '-translate-x-full max-md:pointer-events-none'} md:translate-x-0`}>
+        <div className="hidden md:flex items-center px-4 py-3 border-b border-[#2f2f2f]">
+          <Logo className="h-6" />
+        </div>
         <div className="md:hidden flex items-center justify-between p-3 border-b border-[#2f2f2f]">
-          <span className="font-semibold text-[#ececec]">Menu</span>
+          <Logo className="h-6" />
           <button
             type="button"
             onClick={() => setShowSidebar(false)}
@@ -1932,7 +2004,7 @@ export default function ChatPage() {
       {/* Main Chat Area - ChatGPT Style */}
       <div className="flex-1 flex flex-col bg-black md:bg-[#212121] min-w-0 min-h-0 h-full w-full">
         {/* Mobile header */}
-        <div className="md:hidden flex items-center justify-between px-3 py-2 shrink-0">
+        <div className="md:hidden relative flex items-center justify-between px-3 py-2 shrink-0">
           <button
             type="button"
             onClick={() => setShowSidebar(true)}
@@ -1941,6 +2013,9 @@ export default function ChatPage() {
           >
             <Menu className="w-5 h-5" />
           </button>
+          <h1 className="absolute left-1/2 -translate-x-1/2 max-w-[46%] truncate text-sm font-semibold text-[#ececec] pointer-events-none">
+            {currentSession ? sessionLabel(currentSession) : 'New chat'}
+          </h1>
           <div className="flex items-center gap-2">
             <button
               type="button"
@@ -1994,10 +2069,10 @@ export default function ChatPage() {
 
         {/* Desktop header */}
         <div className="hidden md:flex bg-[#171717] border-b border-[#2f2f2f] px-4 py-3 items-center justify-between gap-2 shrink-0">
-          <div className="flex items-center min-w-0 space-x-2 text-[#ececec]">
-            <Package className="w-5 h-5 text-primary-600 flex-shrink-0" />
-            <span className="font-semibold truncate">ProcureX</span>
-            <span className="text-[#8e8e8e] text-sm">v1</span>
+          <div className="flex items-center min-w-0 text-[#ececec]">
+            <h1 className="font-semibold truncate text-base">
+              {currentSession ? sessionLabel(currentSession) : 'New chat'}
+            </h1>
           </div>
           <div className="flex items-center space-x-3">
             <Link
@@ -2066,10 +2141,10 @@ export default function ChatPage() {
           {currentSession?.messages.length === 0 && (
             <div className="flex items-center justify-center min-h-full py-8">
               <div className="text-center max-w-2xl px-4">
-                <h1 className="text-[28px] md:text-4xl font-medium md:font-semibold text-white mb-3 md:mb-4">
-                  <span className="md:hidden">What&apos;s on the agenda today?</span>
-                  <span className="hidden md:inline">ProcureX</span>
-                </h1>
+                <div className="mb-3 md:mb-4">
+                  <h1 className="md:hidden text-[28px] font-medium text-white">What&apos;s on the agenda today?</h1>
+                  <Logo className="hidden md:inline-block h-12" />
+                </div>
                 <p className="hidden md:block text-[#b4b4b4] text-lg mb-8">Ask me about IT products, prices, and availability!</p>
                 <div className="hidden md:grid grid-cols-1 sm:grid-cols-2 gap-3">
                   {[
@@ -2096,17 +2171,10 @@ export default function ChatPage() {
               <ChatMessage key={index} message={message} onSpeak={voice.speakNow} />
             ))}
             
-            {isLoading && (
+            {waitingForReply && (
               <div className="px-4 py-6 md:py-8 bg-transparent">
-                <div className="flex items-center space-x-3 max-w-3xl mx-auto">
-                  <div className="hidden md:flex w-8 h-8 rounded-full bg-primary-600 items-center justify-center flex-shrink-0">
-                    <MessageSquare className="w-5 h-5 text-white" />
-                  </div>
-                  <div className="flex space-x-1">
-                    <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }}></div>
-                    <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }}></div>
-                    <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '300ms' }}></div>
-                  </div>
+                <div className="flex items-center max-w-3xl mx-auto">
+                  <ProcureXLoader size={48} label="Waiting for ProcureX" />
                 </div>
               </div>
             )}
@@ -2153,14 +2221,18 @@ export default function ChatPage() {
 
           {voice.voiceMode && (
             <div className="md:hidden flex items-center gap-2.5">
-              <div className="flex-1 h-12 rounded-full bg-[#303030] flex items-center px-4 text-[#8e8e8e]">
+              <div className="flex-1 min-h-12 rounded-full bg-[#303030] flex items-center px-4">
                 <Plus className="w-5 h-5 text-white mr-3 flex-shrink-0" />
-                <span>
+                <span className={`min-w-0 flex-1 text-sm leading-snug line-clamp-2 ${
+                  voice.transcript || voice.listening ? 'text-[#ececec]' : 'text-[#8e8e8e]'
+                }`}>
                   {voice.speaking
                     ? 'ProcureX is speaking...'
-                    : voice.listening
-                      ? 'Listening...'
-                      : 'Ask ProcureX'}
+                    : voice.transcript
+                      ? voice.transcript
+                      : voice.listening
+                        ? 'Listening...'
+                        : 'Ask ProcureX'}
                 </span>
               </div>
               <button
@@ -2218,7 +2290,7 @@ export default function ChatPage() {
                 enterKeyHint="send"
                 placeholder={
                   voice.listening
-                    ? 'Listening...'
+                    ? 'Listening... speak now'
                     : voice.speaking
                       ? 'Speaking...'
                       : 'Ask ProcureX'
@@ -2252,8 +2324,8 @@ export default function ChatPage() {
                   className="hidden md:inline-flex m-2 min-h-11 min-w-11 items-center justify-center rounded-lg bg-primary-600 text-white hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex-shrink-0"
                   aria-label="Send"
                 >
-                  {isLoading ? (
-                    <Loader2 className="w-5 h-5 animate-spin" />
+                  {waitingForReply ? (
+                    <ProcureXLoader size={24} label="Waiting for ProcureX" />
                   ) : (
                     <Send className="w-5 h-5 text-white" />
                   )}
@@ -2267,7 +2339,7 @@ export default function ChatPage() {
                     className="md:hidden m-1 h-9 w-9 inline-flex items-center justify-center rounded-full bg-[#3b82f6] text-white disabled:opacity-50 flex-shrink-0"
                     aria-label="Voice mode"
                   >
-                    {isLoading ? <Loader2 className="w-5 h-5 animate-spin" /> : <AudioLines className="w-5 h-5" />}
+                    {waitingForReply ? <ProcureXLoader size={24} label="Waiting for ProcureX" /> : <AudioLines className="w-5 h-5" />}
                   </button>
                   <button
                     type="button"
@@ -2294,7 +2366,7 @@ export default function ChatPage() {
                 className="md:hidden h-12 w-12 rounded-full bg-white text-black inline-flex items-center justify-center flex-shrink-0 disabled:opacity-50"
                 aria-label="Send"
               >
-                {isLoading ? <Loader2 className="w-5 h-5 animate-spin" /> : <ArrowUp className="w-5 h-5" />}
+                {waitingForReply ? <ProcureXLoader size={24} label="Waiting for ProcureX" /> : <ArrowUp className="w-5 h-5" />}
               </button>
             ) : null}
             </div>

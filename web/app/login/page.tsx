@@ -9,6 +9,7 @@ import { hasVendorAccountMarkers, mapSupabaseUser, persistVendorProfile, syncVen
 import { showToast } from '@/lib/toast'
 import Button from '@/components/ui/Button'
 import Input from '@/components/ui/Input'
+import Logo from '@/components/Logo'
 
 export default function LoginPage() {
  const [email, setEmail] = useState('')
@@ -148,7 +149,10 @@ export default function LoginPage() {
  <div className="min-h-[calc(100dvh-3.5rem)] flex items-center justify-center bg-[#212121] py-8 px-4 sm:px-6">
  <div className="max-w-md w-full space-y-8 bg-[#2f2f2f] border border-[#3d3d3d] rounded-2xl shadow-2xl p-5 sm:p-10">
  <div>
- <h2 className="mt-2 sm:mt-6 text-center text-2xl sm:text-3xl font-extrabold text-white">
+ <div className="flex justify-center">
+ <Logo className="h-10 sm:h-12" />
+ </div>
+ <h2 className="mt-4 sm:mt-6 text-center text-2xl sm:text-3xl font-extrabold text-white">
  Sign in to your account
  </h2>
  <p className="mt-2 text-center text-sm text-gray-400">

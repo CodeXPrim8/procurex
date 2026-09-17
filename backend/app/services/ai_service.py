@@ -1,7 +1,8 @@
 import json
 import re
 import logging
-import time
+import queue
+import threading
 from contextvars import ContextVar
 from typing import Dict, List, Optional, Any, Generator
 from ..core.config import settings
@@ -66,14 +67,19 @@ Be commercially sharp, precise, and easy to talk to:
 Do not be playful, emoji-heavy, or vague."""
 
 NGN_PER_USD = 1500
+# Current Gemini flash IDs. Older 1.5/2.x names 404 for new keys and stall replies.
 GEMINI_MODEL_CANDIDATES = [
-    "gemini-3.6-flash",
+    "gemini-flash-lite-latest",
+    "gemini-3.5-flash-lite",
+    "gemini-3.1-flash-lite",
     settings.GEMINI_MODEL,
-    "gemini-flash-latest",
-    "gemini-2.5-flash",
-    "gemini-2.5-flash-lite",
-    "gemini-2.5-pro",
+    "gemini-3.6-flash",
+    "gemini-3.5-flash",
 ]
+VOICE_PROMPT = (
+    "The user is talking with you out loud. Reply in 2-4 short spoken sentences. "
+    "No markdown, bullets, headings, or emoji. Lead with the answer."
+)
 
 CATEGORY_ALIASES = {
     "laptop": "Laptop",
@@ -144,12 +150,53 @@ def format_product_lines(product_results: Optional[List[Dict]], limit: int = 8) 
     return "\n".join(lines)
 
 
+def _yield_with_timeout(factory, first_timeout: float = 5.0, idle_timeout: float = 20.0) -> Generator[str, None, None]:
+    """Fail over quickly if a model never produces a first token."""
+    out: queue.Queue = queue.Queue()
+    cancel = {"done": False}
+
+    def run():
+        try:
+            produced = False
+            for chunk in factory():
+                if cancel["done"]:
+                    return
+                produced = True
+                out.put(("ok", chunk))
+            out.put(("end", produced))
+        except Exception as exc:
+            out.put(("err", exc))
+
+    threading.Thread(target=run, name="px-ai", daemon=True).start()
+    first = True
+    try:
+        while True:
+            try:
+                kind, payload = out.get(timeout=first_timeout if first else idle_timeout)
+            except queue.Empty:
+                raise TimeoutError("AI timed out waiting for a response")
+            if kind == "end":
+                if not payload:
+                    raise Exception("empty response")
+                return
+            if kind == "err":
+                raise payload
+            first = False
+            if payload:
+                yield payload
+    finally:
+        cancel["done"] = True
+
+
 def _chat_messages(
     user_message: str,
     context: Optional[List[Dict[str, str]]] = None,
     product_results: Optional[List[Dict]] = None,
+    voice: bool = False,
 ) -> List[Dict[str, str]]:
     system = SYSTEM_PROMPT
+    if voice:
+        system += "\n\n" + VOICE_PROMPT
     catalog = format_product_lines(product_results)
     if catalog:
         system += (
@@ -174,7 +221,7 @@ def _chat_messages(
 
 def _compat_client(api_key: str, base_url: Optional[str] = None, extra_headers: Optional[Dict[str, str]] = None):
     from openai import OpenAI
-    kwargs: Dict[str, Any] = {"api_key": api_key}
+    kwargs: Dict[str, Any] = {"api_key": api_key, "timeout": 45.0}
     if base_url:
         kwargs["base_url"] = base_url
     if extra_headers:
@@ -182,7 +229,12 @@ def _compat_client(api_key: str, base_url: Optional[str] = None, extra_headers: 
     return OpenAI(**kwargs)
 
 
-def _stream_openai_compat(client, models: List[str], messages: List[Dict[str, str]]) -> Generator[str, None, None]:
+def _stream_openai_compat(
+    client,
+    models: List[str],
+    messages: List[Dict[str, str]],
+    max_tokens: int = 900,
+) -> Generator[str, None, None]:
     last_error = None
     for model in models:
         if not model:
@@ -192,7 +244,7 @@ def _stream_openai_compat(client, models: List[str], messages: List[Dict[str, st
                 model=model,
                 messages=messages,
                 temperature=0.35,
-                max_tokens=1400,
+                max_tokens=max_tokens,
                 stream=True,
             )
             yielded = False
@@ -212,7 +264,7 @@ def _stream_openai_compat(client, models: List[str], messages: List[Dict[str, st
     raise last_error or Exception("No OpenAI-compatible model available")
 
 
-def _stream_claude(messages: List[Dict[str, str]], models: List[str]) -> Generator[str, None, None]:
+def _stream_claude(messages: List[Dict[str, str]], models: List[str], max_tokens: int = 900) -> Generator[str, None, None]:
     import httpx
 
     system = "\n".join(m["content"] for m in messages if m["role"] == "system").strip()
@@ -228,14 +280,14 @@ def _stream_claude(messages: List[Dict[str, str]], models: List[str]) -> Generat
             continue
         try:
             yielded = False
-            with httpx.Client(timeout=45.0) as client:
+            with httpx.Client(timeout=18.0) as client:
                 with client.stream(
                     "POST",
                     "https://api.anthropic.com/v1/messages",
                     headers=headers,
                     json={
                         "model": model,
-                        "max_tokens": 1400,
+                        "max_tokens": max_tokens,
                         "temperature": 0.35,
                         "system": system,
                         "messages": chat,
@@ -273,9 +325,11 @@ def _ai_attempts(
     user_message: str,
     context: Optional[List[Dict[str, str]]],
     product_results: Optional[List[Dict]],
+    voice: bool = False,
 ):
-    messages = _chat_messages(user_message, context, product_results)
+    messages = _chat_messages(user_message, context, product_results, voice=voice)
     used = set()
+    max_tokens = 320 if voice else 900
 
     def add(name: str, runner):
         if name in used:
@@ -291,14 +345,16 @@ def _ai_attempts(
             client,
             [settings.GROK_MODEL, "grok-4", "grok-3", "grok-2-latest"],
             messages,
+            max_tokens,
         ))
 
     if settings.OPENAI_API_KEY:
         client = _compat_client(settings.OPENAI_API_KEY)
         add("ChatGPT", lambda: _stream_openai_compat(
             client,
-            [settings.OPENAI_MODEL, "gpt-4o", "gpt-4.1", "gpt-4o-mini"],
+            ["gpt-4o-mini", settings.OPENAI_MODEL, "gpt-4o", "gpt-4.1"],
             messages,
+            max_tokens,
         ))
 
     if settings.MOONSHOT_API_KEY:
@@ -307,12 +363,14 @@ def _ai_attempts(
             client,
             [settings.MOONSHOT_MODEL, "kimi-k2-0905", "moonshot-v1-auto", "moonshot-v1-128k"],
             messages,
+            max_tokens,
         ))
 
     if settings.ANTHROPIC_API_KEY:
         add("Claude", lambda: _stream_claude(
             messages,
             [settings.ANTHROPIC_MODEL, "claude-sonnet-4-5", "claude-3-5-sonnet-latest"],
+            max_tokens,
         ))
 
     if settings.OPENROUTER_API_KEY:
@@ -326,15 +384,15 @@ def _ai_attempts(
         )
         openrouter_models = [
             ("Grok", [f"x-ai/{settings.GROK_MODEL}", "x-ai/grok-4", "x-ai/grok-3"]),
-            ("ChatGPT", [f"openai/{settings.OPENAI_MODEL}", "openai/gpt-4o", "openai/gpt-4.1"]),
+            ("ChatGPT", ["openai/gpt-4o-mini", f"openai/{settings.OPENAI_MODEL}", "openai/gpt-4o"]),
             ("Kimi", ["moonshotai/kimi-k2", "moonshotai/kimi-k2-0905", "moonshot/kimi-k2"]),
             ("Claude", ["anthropic/claude-sonnet-4.5", "anthropic/claude-sonnet-4", "anthropic/claude-3.5-sonnet"]),
         ]
         for name, models in openrouter_models:
-            add(name, lambda models=models: _stream_openai_compat(client, models, messages))
+            add(name, lambda models=models: _stream_openai_compat(client, models, messages, max_tokens))
 
     if _gemini_client:
-        add("Gemini", lambda: _generate_gemini_response(user_message, context, product_results))
+        add("Gemini", lambda: _generate_gemini_response(user_message, context, product_results, voice=voice))
 
     provider = (settings.AI_PROVIDER or "smart").lower()
     if provider in {"grok", "chatgpt", "openai", "kimi", "claude", "gemini"}:
@@ -360,7 +418,8 @@ def is_catalog_query(user_message: str, parsed: Optional[Dict[str, Any]] = None)
 def _generate_gemini_response(
     user_message: str,
     context: Optional[List[Dict[str, str]]] = None,
-    product_results: Optional[List[Dict]] = None
+    product_results: Optional[List[Dict]] = None,
+    voice: bool = False,
 ) -> Generator[str, None, None]:
     """Generate response using Google Gemini (FREE tier available)."""
     if not _gemini_client:
@@ -371,6 +430,8 @@ def _generate_gemini_response(
         
         # Build the full prompt with system context
         system_context = SYSTEM_PROMPT
+        if voice:
+            system_context += "\n\n" + VOICE_PROMPT
         catalog = format_product_lines(product_results)
         if catalog:
             system_context += (
@@ -399,7 +460,7 @@ def _generate_gemini_response(
             "temperature": 0.35,
             "top_p": 0.9,
             "top_k": 40,
-            "max_output_tokens": 1200,
+            "max_output_tokens": 320 if voice else 900,
         }
 
         def extract_text(chunk) -> str:
@@ -423,6 +484,27 @@ def _generate_gemini_response(
                                 parts_text.append(part.text)
             return "".join(parts_text)
 
+        def stream_model(model_name: str) -> Generator[str, None, None]:
+            model = genai.GenerativeModel(model_name)
+            response = model.generate_content(
+                full_prompt,
+                stream=True,
+                generation_config=generation_config,
+            )
+            prior = ""
+            for chunk in response:
+                text = extract_text(chunk)
+                if not text:
+                    continue
+                if prior and text.startswith(prior):
+                    delta = text[len(prior):]
+                    prior = text
+                else:
+                    delta = text
+                    prior += text
+                if delta:
+                    yield delta
+
         last_model_error = None
         seen = set()
         for candidate in GEMINI_MODEL_CANDIDATES:
@@ -431,18 +513,10 @@ def _generate_gemini_response(
                 continue
             seen.add(model_name)
             try:
-                model = genai.GenerativeModel(model_name)
-                response = model.generate_content(
-                    full_prompt,
-                    stream=True,
-                    generation_config=generation_config,
-                )
                 yielded = False
-                for chunk in response:
-                    text = extract_text(chunk)
-                    if text:
-                        yielded = True
-                        yield text
+                for text in _yield_with_timeout(lambda name=model_name: stream_model(name), first_timeout=4.5):
+                    yielded = True
+                    yield text
                 if yielded:
                     logger.info("Gemini response generated with %s", model_name)
                     return
@@ -642,14 +716,17 @@ def _generate_fallback_response(
 def generate_ai_response(
     user_message: str,
     context: Optional[List[Dict[str, str]]] = None,
-    product_results: Optional[List[Dict]] = None
+    product_results: Optional[List[Dict]] = None,
+    voice: bool = False,
 ) -> Generator[str, None, None]:
     """Try Grok, ChatGPT, Kimi, and Claude, then Gemini, then the catalog fallback."""
-    for name, runner in _ai_attempts(user_message, context, product_results):
+    first_timeout = 4.5 if voice else 7.0
+    for name, runner in _ai_attempts(user_message, context, product_results, voice=voice):
         try:
             logger.info("Using %s for AI response", name)
             produced = False
-            for chunk in runner():
+            wait = 8.0 if name == "Gemini" else first_timeout
+            for chunk in _yield_with_timeout(runner, first_timeout=wait):
                 if chunk:
                     produced = True
                     yield chunk

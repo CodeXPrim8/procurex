@@ -1,5 +1,6 @@
 import logging
 import asyncio
+import contextvars
 from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect, HTTPException, status
 from sqlalchemy.orm import Session, joinedload
 from typing import List, Optional
@@ -27,6 +28,37 @@ from ..schemas.product import ProductSearch
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 logger = logging.getLogger(__name__)
+
+
+async def _stream_ai_chunks(
+    user_message: str,
+    context,
+    product_results,
+    voice: bool,
+):
+    loop = asyncio.get_running_loop()
+    out: asyncio.Queue = asyncio.Queue()
+    ctx = contextvars.copy_context()
+
+    def produce():
+        try:
+            for chunk in generate_ai_response(
+                user_message, context, product_results, voice=voice
+            ):
+                asyncio.run_coroutine_threadsafe(out.put(("ok", chunk)), loop).result()
+            asyncio.run_coroutine_threadsafe(out.put(("end", None)), loop).result()
+        except Exception as exc:
+            asyncio.run_coroutine_threadsafe(out.put(("err", exc)), loop).result()
+
+    loop.run_in_executor(None, lambda: ctx.run(produce))
+    while True:
+        kind, payload = await out.get()
+        if kind == "end":
+            return
+        if kind == "err":
+            raise payload
+        if payload:
+            yield payload
 
 
 def _apply_natural_title(session: ChatSession, user_texts: List[str]) -> Optional[str]:
@@ -239,6 +271,7 @@ async def websocket_chat(
                 # Receive user message
                 data = await websocket.receive_json()
                 user_message = data.get("message", "")
+                voice_mode = bool(data.get("voice"))
                 
                 if not user_message:
                     await websocket.send_json({
@@ -330,7 +363,7 @@ async def websocket_chat(
                     loop = asyncio.get_running_loop()
                     product_results = await asyncio.wait_for(
                         loop.run_in_executor(None, search_products_sync),
-                        timeout=3.0,
+                        timeout=1.2,
                     ) or []
                 except Exception as e:
                     logger.warning(f"Catalog search skipped: {e}")
@@ -357,7 +390,9 @@ async def websocket_chat(
                     chunk_count = 0
                     has_error = False
                     try:
-                        for chunk in generate_ai_response(user_message, context, product_results):
+                        async for chunk in _stream_ai_chunks(
+                            user_message, context, product_results, voice_mode
+                        ):
                             if chunk:  # Only process non-empty chunks
                                 assistant_response += chunk
                                 chunk_count += 1

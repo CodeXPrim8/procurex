@@ -49,7 +49,7 @@ class Settings(BaseSettings):
     
     # Google Gemini (Free tier available)
     GEMINI_API_KEY: Optional[str] = None
-    GEMINI_MODEL: str = "gemini-3.6-flash"
+    GEMINI_MODEL: str = "gemini-flash-lite-latest"
     
     # Hugging Face (Free tier available)
     HUGGINGFACE_API_KEY: Optional[str] = None
