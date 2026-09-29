@@ -87,7 +87,7 @@ export default function VoiceOverlay({
       if (event.key !== 'Tab') return
       const root = overlayRef.current
       if (!root) return
-      const items = [...root.querySelectorAll<HTMLElement>('button:not([disabled])')]
+      const items = Array.from(root.querySelectorAll<HTMLElement>('button:not([disabled])'))
       if (!items.length) return
       const first = items[0]
       const last = items[items.length - 1]

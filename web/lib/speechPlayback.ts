@@ -31,7 +31,7 @@ function getAudioElement() {
   if (!audioEl) {
     audioEl = new Audio()
     audioEl.preload = 'auto'
-    audioEl.playsInline = true
+    audioEl.setAttribute('playsinline', 'true')
     audioEl.crossOrigin = 'anonymous'
     mediaSource = ctx.createMediaElementSource(audioEl)
     mediaSource.connect(analyser)

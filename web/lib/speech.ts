@@ -33,6 +33,37 @@ let streamToken = 0
 let analysableSpeech = false
 let ttsAudioFailed = false
 
+export type SpeechPlaybackSnap =
+  | { type: 'start'; token: number; text: string }
+  | { type: 'boundary'; token: number; text: string; charIndex: number }
+  | { type: 'end'; token: number }
+  | { type: 'cancel'; token: number }
+
+type SpeechPlaybackState = { token: number; text: string; speaking: boolean }
+
+let playbackState: SpeechPlaybackState = { token: 0, text: '', speaking: false }
+const playbackListeners = new Set<(snap: SpeechPlaybackSnap) => void>()
+
+function emitSpeechPlayback(snap: SpeechPlaybackSnap) {
+  if (snap.type === 'start' || snap.type === 'boundary') {
+    playbackState = { token: snap.token, text: snap.text, speaking: true }
+  } else {
+    playbackState = { token: snap.token, text: '', speaking: false }
+  }
+  playbackListeners.forEach((listener) => listener(snap))
+}
+
+export function getSpeechPlayback() {
+  return playbackState
+}
+
+export function subscribeSpeechPlayback(listener: (snap: SpeechPlaybackSnap) => void) {
+  playbackListeners.add(listener)
+  return () => {
+    playbackListeners.delete(listener)
+  }
+}
+
 export function setAnalysableSpeech(enabled: boolean) {
   analysableSpeech = enabled
   if (enabled) unlockSpeechAudio()
@@ -40,6 +71,7 @@ export function setAnalysableSpeech(enabled: boolean) {
 }
 
 export function stopSpeaking() {
+  const token = speakToken
   speakToken += 1
   streamQueue = []
   streamPlaying = false
@@ -47,6 +79,7 @@ export function stopSpeaking() {
   streamOnEnd = undefined
   stopVoiceCues()
   stopPlaybackAudio()
+  emitSpeechPlayback({ type: 'cancel', token })
   if (typeof window === 'undefined' || !window.speechSynthesis) return
   window.speechSynthesis.cancel()
 }
@@ -132,12 +165,22 @@ function speakSynth(text: string, onEnd: () => void, voiceId?: string) {
   const utterance = new SpeechSynthesisUtterance(text)
   const preferred = pickVoice(voiceId)
   const style = synthStyle(voiceId)
+  const token = speakToken
   utterance.rate = style.rate
   utterance.pitch = style.pitch
   utterance.lang = preferred?.lang || navigator.language || 'en-US'
   if (preferred) utterance.voice = preferred
+  utterance.onboundary = (event) => {
+    emitSpeechPlayback({
+      type: 'boundary',
+      token,
+      text,
+      charIndex: Number((event as SpeechSynthesisEvent).charIndex || 0),
+    })
+  }
   utterance.onend = onEnd
   utterance.onerror = onEnd
+  emitSpeechPlayback({ type: 'start', token, text })
   window.speechSynthesis.speak(utterance)
   try {
     window.speechSynthesis.resume()
@@ -230,11 +273,13 @@ function playStreamNext() {
     if (streamEnded) {
       const done = streamOnEnd
       streamOnEnd = undefined
+      emitSpeechPlayback({ type: 'end', token: speakToken })
       done?.()
     }
     return
   }
   streamPlaying = true
+  emitSpeechPlayback({ type: 'start', token: speakToken, text: next.text })
   const following = streamQueue[0]
   if (following && !following.clip && analysableSpeech && !ttsAudioFailed) {
     following.clip = fetchSpeechClip(following.text)
@@ -282,6 +327,7 @@ export function endSpokenReply() {
   if (!streamPlaying && streamQueue.length === 0) {
     const done = streamOnEnd
     streamOnEnd = undefined
+    emitSpeechPlayback({ type: 'end', token: speakToken })
     done?.()
   }
 }

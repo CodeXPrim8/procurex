@@ -1868,6 +1868,7 @@ export default function ChatPage() {
       showToast('Could not start a chat. Try again.', 'error')
       return
     }
+    const chat = session
 
     setInput('')
     setIsLoading(true)
@@ -1876,40 +1877,40 @@ export default function ChatPage() {
     const userMsg = { role: 'user' as const, content: userMessage }
     addMessage(userMsg)
     const topicText =
-      [...(session.messages || []), userMsg]
+      [...(chat.messages || []), userMsg]
         .filter((item) => item.role === 'user' && String(item.content || '').trim())
         .map((item) => String(item.content))
         .filter((text) => !isSmalltalk(text))
         .slice(-1)[0] || userMessage
     const existingTitles = sessions
-      .filter((item) => !sameChatId(item.id, session.id))
+      .filter((item) => !sameChatId(item.id, chat.id))
       .map((item) => item.title || '')
-    const generated = naturalChatTitle(topicText, session.title, {
+    const generated = naturalChatTitle(topicText, chat.title, {
       existingTitles,
-      locked: isChatTitleLocked(session.id),
+      locked: isChatTitleLocked(chat.id),
     })
-    const nextTitle = generated || session.title || 'New chat'
+    const nextTitle = generated || chat.title || 'New chat'
     setSessions((prev) => {
       const now = new Date().toISOString()
-      const rest = prev.filter((item) => !sameChatId(item.id, session.id))
-      const current = prev.find((item) => sameChatId(item.id, session.id))
+      const rest = prev.filter((item) => !sameChatId(item.id, chat.id))
+      const current = prev.find((item) => sameChatId(item.id, chat.id))
       return [
         {
-          ...(current || session),
-          id: session.id,
-          title: nextTitle || current?.title || session.title || 'New chat',
+          ...(current || chat),
+          id: chat.id,
+          title: nextTitle || current?.title || chat.title || 'New chat',
           updated_at: now,
-          messages: current?.messages || session.messages || [],
-          legacy_id: session.legacy_id ?? current?.legacy_id,
+          messages: current?.messages || chat.messages || [],
+          legacy_id: chat.legacy_id ?? current?.legacy_id,
         },
         ...rest,
       ]
     })
     useStore.setState((state) => {
-      if (!state.currentSession || !sameChatId(state.currentSession.id, session.id)) return {}
+      if (!state.currentSession || !sameChatId(state.currentSession.id, chat.id)) return {}
       return { currentSession: { ...state.currentSession, title: nextTitle } }
     })
-    void persistAccountMessage(session, 'user', userMessage, nextTitle)
+    void persistAccountMessage(chat, 'user', userMessage, nextTitle)
 
     const token = (await getAccessToken()) || (await ensureFreshSession())
     const authed = Boolean(token)
@@ -1921,10 +1922,10 @@ export default function ChatPage() {
           showToast('Your login session expired. Log in again for live catalog answers.', 'warning')
         }
         // Save message to local storage
-        const updatedMessages = [...(session?.messages || []), userMsg]
+        const updatedMessages = [...(chat.messages || []), userMsg]
         const updatedSession = {
-          ...session,
-          title: nextTitle || session.title,
+          ...chat,
+          title: nextTitle || chat.title,
           messages: updatedMessages,
           updated_at: new Date().toISOString(),
         }
@@ -1954,14 +1955,14 @@ export default function ChatPage() {
 
     // Authenticated users: Try WebSocket first, fallback to REST API
     try {
-      let wsId = accountWsId(session)
+      let wsId = accountWsId(chat)
       if (!wsId && token) {
         try {
-          const created = await chatAPI.createSession(nextTitle || session?.title || 'Voice chat')
+          const created = await chatAPI.createSession(nextTitle || chat.title || 'Voice chat')
           wsId = created.id
           const next = {
-            ...session,
-            id: isServerSession(session?.id) ? session.id : created.id,
+            ...chat,
+            id: isServerSession(chat.id) ? chat.id : created.id,
             legacy_id: created.id,
           }
           session = next
@@ -1992,26 +1993,27 @@ export default function ChatPage() {
 
       // Fallback to REST API with live generate, then canned scripts
       console.log('WebSocket not available, using REST API fallback')
+      const sendChat = session || chat
       
       const applyAssistant = async (assistantResponse: string, extra?: { title?: string; product_results?: any[]; quotation?: any; saved?: boolean }) => {
         addMessage({ role: 'assistant' as const, content: assistantResponse, quotation: extra?.quotation })
         if (extra?.product_results) setProductResults(extra.product_results)
-        const title = isChatTitleLocked(session.id)
+        const title = isChatTitleLocked(sendChat.id)
           ? nextTitle
           : uniqueChatTitle(extra?.title || nextTitle, existingTitles)
         if (title !== nextTitle) {
           setSessions((prev) =>
-            prev.map((item) => (sameChatId(item.id, session.id) ? { ...item, title } : item))
+            prev.map((item) => (sameChatId(item.id, sendChat.id) ? { ...item, title } : item))
           )
           useStore.setState((state) => {
-            if (!state.currentSession || !sameChatId(state.currentSession.id, session.id)) return {}
+            if (!state.currentSession || !sameChatId(state.currentSession.id, sendChat.id)) return {}
             return { currentSession: { ...state.currentSession, title } }
           })
         }
         setIsLoading(false)
         sendLockRef.current = false
         speakReplyFn.current(assistantResponse)
-        void persistAccountMessage(session, 'assistant', assistantResponse, title)
+        void persistAccountMessage(sendChat, 'assistant', assistantResponse, title)
         if (wsId && !extra?.saved) {
           try {
             await chatAPI.createMessage(wsId, assistantResponse, 'assistant')
@@ -2036,7 +2038,7 @@ export default function ChatPage() {
           const assistantResponse = String(reply?.content || '').trim()
           if (assistantResponse) {
             await applyAssistant(assistantResponse, {
-              title: isChatTitleLocked(session.id) ? nextTitle : reply.title || nextTitle,
+              title: isChatTitleLocked(sendChat.id) ? nextTitle : reply.title || nextTitle,
               product_results: reply.product_results,
               quotation: reply.quotation,
               saved: true,
@@ -2261,7 +2263,7 @@ export default function ChatPage() {
           <Button
             variant="ghost"
             size="sm"
-            onClick={createNewSession}
+            onClick={() => void createNewSession()}
             disabled={hasReachedLimit}
             className="w-full justify-start bg-transparent hover:bg-[#2f2f2f] text-[#ececec] disabled:opacity-50"
           >
