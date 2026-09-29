@@ -1,17 +1,10 @@
 import { createClient as createBrowserSupabase, type SupabaseClient } from '@supabase/supabase-js'
 import { createClient as createBrowserSSRClient } from '@/utils/supabase/client'
+import { getSupabaseAnonKey, getSupabaseUrl, isSupabaseEnvConfigured } from '@/lib/supabaseEnv'
 
-const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || ''
-const supabaseKey =
-  process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY ||
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ||
-  ''
-
-const isConfigured =
-  Boolean(supabaseUrl) &&
-  Boolean(supabaseKey) &&
-  supabaseUrl.startsWith('https://') &&
-  (supabaseKey.startsWith('eyJ') || supabaseKey.startsWith('sb_'))
+const supabaseUrl = getSupabaseUrl()
+const supabaseKey = getSupabaseAnonKey()
+const isConfigured = isSupabaseEnvConfigured()
 
 if (!isConfigured && typeof window !== 'undefined') {
   console.error(
@@ -27,8 +20,8 @@ if (!isConfigured && typeof window !== 'undefined') {
 export const supabase: SupabaseClient = isConfigured
   ? (createBrowserSSRClient() as unknown as SupabaseClient)
   : createBrowserSupabase(
-      'https://placeholder.supabase.co',
-      'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.placeholder',
+      supabaseUrl || 'https://placeholder.supabase.co',
+      supabaseKey || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.placeholder',
       {
         auth: {
           autoRefreshToken: false,

@@ -7,6 +7,7 @@ import { authAPI } from '@/lib/api'
 import { useStore } from '@/lib/store'
 import { mapSupabaseUser, persistVendorProfile, resolveVendorAccess, useAuth } from '@/lib/auth'
 import { getAccessToken } from '@/lib/sessionToken'
+import { isSupabaseConfigured } from '@/lib/supabaseClient'
 import { showToast } from '@/lib/toast'
 import Button from '@/components/ui/Button'
 import Input from '@/components/ui/Input'
@@ -72,6 +73,10 @@ export default function LoginPage() {
 
  const handleLogin = async (e: React.FormEvent) => {
  e.preventDefault()
+ if (!isSupabaseConfigured) {
+  showToast('Sign-in is not configured on this site. Add the live Supabase URL and publishable key in Vercel, then redeploy.', 'error')
+  return
+ }
  setIsLoading(true)
 
  try {
@@ -139,15 +144,24 @@ export default function LoginPage() {
  console.error('Login error:', err)
  let message = 'Login failed'
  const status = Number(err?.status || err?.code || err?.response?.status || 0)
- const raw = String(err?.message || err?.error_description || '')
+ const raw = String(err?.message || err?.error_description || err?.name || '')
+ const name = String(err?.name || '')
  
- if (status === 503 || status === 502 || status === 504 || /HTTP 503|upstream connect|service unavailable/i.test(raw)) {
- message = 'Sign-in is temporarily unavailable. Wait a minute and try again, and check that your Supabase project is not paused.'
- } else if (raw.includes('Invalid login credentials')) {
+ if (raw.includes('Invalid login credentials')) {
  message = 'Invalid email or password. Please try again.'
  } else if (raw.includes('Email not confirmed')) {
  message = 'Please check your email and confirm your account before signing in.'
- } else if (/network|fetch|Failed to fetch/i.test(raw)) {
+ } else if (/invalid api key|jwt|not a valid api key/i.test(raw)) {
+ message = 'This site is using the wrong Supabase API key. Update the Vercel publishable key to match the live project, then redeploy.'
+ } else if (
+  status === 503 ||
+  status === 502 ||
+  status === 504 ||
+  name === 'AuthRetryableFetchError' ||
+  /HTTP 503|upstream connect|service unavailable|failed to fetch|network request failed/i.test(raw)
+ ) {
+ message = 'Could not reach sign-in. Confirm this Vercel domain is allowed on your Supabase publishable key, then try again.'
+ } else if (/network|fetch/i.test(raw)) {
  message = 'Network error. Please check your internet connection and try again.'
  } else if (raw) {
  message = raw
