@@ -20,6 +20,8 @@ class User(Base):
     full_name = Column(String, nullable=True)
     is_active = Column(Boolean, default=True)
     role = Column(SQLEnum(UserRole), default=UserRole.BUYER)
+    country = Column(String, nullable=True)  # ISO 3166-1 alpha-2, chosen by the user
+    preferred_currency = Column(String, nullable=True)  # ISO 4217
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -27,6 +29,7 @@ class User(Base):
     vendor = relationship("Vendor", back_populates="user", uselist=False)
     chat_sessions = relationship("ChatSession", back_populates="user")
     quotations = relationship("Quotation", back_populates="user")
+    businesses = relationship("BuyerBusiness", back_populates="user")
 
 
 

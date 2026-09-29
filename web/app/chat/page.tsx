@@ -5,12 +5,8 @@ import {
   MessageSquare,
   Send,
   Plus,
-  ShoppingCart,
   FileText,
   Search,
-  BookOpen,
-  Folder,
-  Bell,
   Settings,
   User,
   LogOut,
@@ -24,32 +20,41 @@ import {
   ArrowUp,
   Menu,
   X,
+  Trash2,
 } from 'lucide-react'
 import Link from 'next/link'
-import Image from 'next/image'
 import { useRouter } from 'next/navigation'
 import { useStore } from '@/lib/store'
 import { chatAPI } from '@/lib/api'
-import { useAuth } from '@/lib/auth'
+import { useIsVendor, useAuth, isSuperAdmin } from '@/lib/auth'
 import ChatMessage from '@/components/ChatMessage'
 import Logo from '@/components/Logo'
 import ProcureXLoader from '@/components/ProcureXLoader'
 import ProductCard from '@/components/ProductCard'
+import SuperadminPagesMenu from '@/components/SuperadminPagesMenu'
+import BusinessSwitcher from '@/components/BusinessSwitcher'
 import Button from '@/components/ui/Button'
 import { showToast } from '@/lib/toast'
-import { getAccessToken } from '@/lib/sessionToken'
-import { naturalChatTitle } from '@/lib/chatTitle'
+import { debugAuthLog, debugAuthStorageSnapshot } from '@/lib/debugAuthLog'
+import { getAccessToken, hasLiveSession, ensureFreshSession } from '@/lib/sessionToken'
+import { naturalChatTitle, isSmalltalk, isChatTitleLocked, isWeakTitle, uniqueChatTitle, lockChatTitle, uniquifySessionTitles } from '@/lib/chatTitle'
 import { getDisplayCurrencyNow, formatFromUsd } from '@/lib/currency'
+import { quoteScopePayload } from '@/lib/businessContext'
 import { useVoiceChat } from '@/lib/useVoiceChat'
+import VoiceOverlay from '@/components/voice/VoiceOverlay'
+import type { VoiceOrbState } from '@/components/voice/VoiceOrb'
 import {
   cloudChatsReady,
   createCloudSession,
   getCloudSession,
+  deleteCloudSession,
   importApiSessionToCloud,
   isCloudSessionId,
   listCloudSessions,
+  mergeChatHistory,
   saveCloudMessage,
   subscribeCloudChats,
+  updateCloudSession,
 } from '@/lib/cloudChats'
 
 const LAST_CHAT_KEY = 'procurex_last_chat_id'
@@ -61,9 +66,15 @@ function accountChatsKey(userId: string) {
 
 function isBlankChat(session: any) {
   const title = (session?.title || 'New chat').trim().toLowerCase()
-  const untitled = !title || title === 'new chat' || title === 'newchat'
+  const untitled = !title || title === 'newchat' || /^new chat(?:\s+\d+)?$/.test(title)
   const messages = session?.messages
   return untitled && (!messages || messages.length === 0)
+}
+
+const GUEST_CHAT_LIMIT = 5
+
+function countGuestChats(list: any[]) {
+  return (Array.isArray(list) ? list : []).filter((item) => !isBlankChat(item)).length
 }
 
 function readStoredSessions(key: string): any[] {
@@ -158,6 +169,110 @@ function catalogPriceRangeLabel(minNgn = 30000, maxNgn = 80000) {
   return `${fmt(minNgn)}–${fmt(maxNgn)}`
 }
 
+function isHearMeUtterance(text: string) {
+  return /\b(can you hear me|are you there|you hear me|why aren'?t you responding|not responding)\b/i.test(text)
+}
+
+function isShortGreeting(text: string) {
+  const spoken = (text || '').toLowerCase().trim()
+  if (!spoken || isHearMeUtterance(spoken)) return false
+  return /^(hello|hi|hey|good morning|good afternoon|good evening|greetings|howdy)([,.!?\s]*)$/i.test(spoken)
+}
+
+function cannedAssistantReply(userMessage: string, options: { guest?: boolean; priceRange?: string } = {}) {
+  const lowerMessage = (userMessage || '').toLowerCase().trim()
+  const guest = Boolean(options.guest)
+  const priceRange = options.priceRange || catalogPriceRangeLabel()
+
+  if (isHearMeUtterance(lowerMessage)) {
+    return guest
+      ? 'Yes, I can hear you. Tell me the product and budget. Login if you want live catalog prices.'
+      : 'Yes, I can hear you. Tell me the product and budget and I will take the next step.'
+  }
+
+  if (isShortGreeting(lowerMessage)) {
+    return "Hello! I'm ProcureX, your AI procurement assistant. I can help you find IT products, compare prices, check availability, and connect you with verified vendors. What are you looking for today?"
+  }
+
+  if (lowerMessage.includes('how are you') || lowerMessage.includes("how's it going") || lowerMessage.includes('how do you do')) {
+    return "I'm doing great, thank you for asking! I'm here and ready to help you with your IT procurement needs. What can I assist you with today?"
+  }
+
+  if (/^(thanks?|thank you|appreciate it)$/i.test(lowerMessage) || lowerMessage.startsWith('thank')) {
+    return guest
+      ? "You're very welcome! I'm happy to help. To access pricing and vendor information, please login to your account. Is there anything else I can help with?"
+      : "You're very welcome! I'm happy to help. Is there anything else you'd like to know about our products or services?"
+  }
+
+  if (guest) {
+    if (lowerMessage.includes('product') || lowerMessage.includes('laptop') || lowerMessage.includes('phone') || lowerMessage.includes('tablet') || lowerMessage.includes('monitor') || lowerMessage.includes('software') || lowerMessage.includes('website')) {
+      return "I can help you find IT products! However, to see real-time pricing, availability, and vendor information, please login to your account. Once logged in, I'll instantly show you matching products with prices, stock levels, and verified vendor details. Would you like to login now?"
+    }
+    if (lowerMessage.includes('quote') || lowerMessage.includes('quotation')) {
+      return 'I can generate professional quotations for you! To create and export quotations, please login to your ProcureX account. After logging in, I can help you build detailed quotes with product specifications, pricing, and vendor information.'
+    }
+    if (lowerMessage.includes('vendor') || lowerMessage.includes('supplier')) {
+      return "ProcureX connects you with verified vendors for IT products. After you login, I can show you vendor profiles, contact information, product catalogs, and stock availability. This helps ensure you're working with trusted suppliers."
+    }
+    if (lowerMessage.includes('what can you') || lowerMessage.includes('help me') || lowerMessage.includes('what do you do')) {
+      return "I'm ProcureX, your AI procurement assistant! Here's what I can help you with:\n\n🔍 **Product Discovery**: Find IT products matching your requirements\n💰 **Pricing Information**: Get current prices from verified vendors\n📊 **Availability Checks**: Check stock levels in real-time\n🏢 **Vendor Connections**: Connect with verified suppliers\n📄 **Quotation Generation**: Create professional procurement quotes\n\nTo access these features, please login to your account. What would you like to know?"
+    }
+      return "I'm here to help with IT procurement! I can assist you with:\n\n• Finding IT products (laptops, phones, tablets, accessories)\n• Software that solves a business problem\n• Services such as websites and custom apps\n• Comparing prices and specifications\n• Checking availability and stock levels\n• Connecting with verified vendors\n• Generating quotations\n\nTo access pricing and vendor information, please login to your account. What would you like to know?"
+  }
+
+  if (
+    lowerMessage.includes('software') ||
+    lowerMessage.includes('saas') ||
+    /\bapps?\b/.test(lowerMessage) ||
+    lowerMessage.includes('crm') ||
+    (lowerMessage.includes('manage') && (lowerMessage.includes('inventory') || lowerMessage.includes('payroll') || lowerMessage.includes('invoice') || lowerMessage.includes('sales')))
+  ) {
+    return guest
+      ? 'I can help you find software for that. Login to see live tools, prices, and vendors that match the problem you described.'
+      : 'I can search software that solves that problem. Tell me the workflow you want to fix (inventory, payroll, invoicing, CRM) and a budget if you have one.'
+  }
+
+  if (
+    lowerMessage.includes('website') ||
+    lowerMessage.includes('web design') ||
+    lowerMessage.includes('web development') ||
+    lowerMessage.includes('app development') ||
+    /build (me )?(a |an )?(website|app|software)/.test(lowerMessage)
+  ) {
+    return guest
+      ? 'Vendors here also offer services like websites and custom apps. Login to see who can build it and starting prices.'
+      : 'I can find vendors who build websites, apps, and custom software. Tell me what you need built and any timeline or budget.'
+  }
+
+  if (lowerMessage.includes('laptop') || lowerMessage.includes('computer') || lowerMessage.includes('notebook')) {
+    if (lowerMessage.includes('12') || lowerMessage.includes('kid') || lowerMessage.includes('child') || lowerMessage.includes('son') || lowerMessage.includes('daughter')) {
+      return `I can help you find the perfect laptop! For a 12-year-old, I'd recommend:\n\n**Educational Laptops (Budget-friendly):**\n• 13-15 inch screen size\n• 8GB RAM minimum\n• 256GB storage\n• Intel Core i3/i5 or AMD Ryzen 3/5\n• Lightweight for carrying to school\n\n**Key Considerations:**\n• Durability and build quality\n• Good battery life\n• Suitable for schoolwork, light gaming, and creative projects\n• Parental controls and safety features\n\n**Price Range:** ${priceRange}\n\nWould you like me to show you specific laptop models that match these criteria? I can search our catalog for verified vendors with current pricing and availability.`
+    }
+    return `I can help you find the perfect laptop! To recommend the best option, I need to know:\n\n• What will you primarily use it for? (work, gaming, school, creative tasks)\n• Budget range\n• Any specific requirements? (screen size, RAM, storage, portability)\n\nOnce you share these details, I'll search our catalog and show you matching laptops with prices, specifications, and vendor information. What's your budget range?`
+  }
+
+  if (lowerMessage.includes('phone') || lowerMessage.includes('smartphone') || lowerMessage.includes('mobile')) {
+    return 'I can help you find a suitable phone! To recommend the best options, tell me:\n\n• What features are important to you? (camera, battery life, performance)\n• Budget range\n• Brand preferences (if any)\n• Intended use (calls, social media, gaming, work)\n\nWould you like me to search for available phones with current pricing?'
+  }
+
+  if (
+    (/\b(products?|items?|buy)\b/.test(lowerMessage) || /\bpurchase\b/.test(lowerMessage)) &&
+    !/\bpurchase orders?\b/.test(lowerMessage)
+  ) {
+    return 'I can help you find IT products, software, and services! What specifically are you looking for?\n\n• Hardware (laptops, phones, tablets, monitors)\n• Software that solves a problem (inventory, payroll, CRM)\n• A service (website, mobile app, custom software)\n• Budget range\n• Quantity or timeline\n\nOnce you provide these details, I\'ll search our catalog and show you matching listings with real-time pricing and vendor information!'
+  }
+
+  if (lowerMessage.includes('price') || lowerMessage.includes('cost') || lowerMessage.includes('how much') || lowerMessage.includes('pricing')) {
+    return 'I can help you get pricing information! To provide accurate prices for IT products, I need to know:\n\n• What product are you interested in?\n• Any specific specifications or brand preferences?\n• Quantity needed?\n\nOnce you provide these details, I\'ll search our database and show you current prices from verified vendors along with availability.'
+  }
+
+  if (lowerMessage.includes('what can you') || lowerMessage.includes('help me') || lowerMessage.includes('what do you do') || lowerMessage.includes('capabilities')) {
+    return "I'm ProcureX, your AI procurement assistant! Here's what I can help you with:\n\n🔍 **Product Discovery**: Find IT products matching your requirements\n💰 **Pricing Information**: Get current prices from verified vendors\n📊 **Availability Checks**: Check stock levels in real-time\n🏢 **Vendor Connections**: Connect with verified suppliers\n📄 **Quotation Generation**: Create professional procurement quotes\n📋 **Product Comparison**: Compare specifications and prices\n✨ **Smart Recommendations**: Get AI-powered product suggestions\n\nJust tell me what you're looking for, and I'll help you find it quickly!"
+  }
+
+  return "I'm with you. What product, quantity, or budget should I use next?"
+}
+
 function makeLocalSession() {
   return {
     id: Date.now(),
@@ -170,6 +285,25 @@ function makeLocalSession() {
 
 function sameChatId(a: unknown, b: unknown) {
   return a != null && b != null && String(a) === String(b)
+}
+
+function applyCloudSession(current: any, incoming: any) {
+  if (!incoming) return incoming
+  const same = current && sameChatId(current.id, incoming.id)
+  const keepTitle =
+    same &&
+    current.title &&
+    (isChatTitleLocked(current.id) ||
+      (isWeakTitle(incoming.title) && !isWeakTitle(current.title)))
+  const title = keepTitle ? current.title : incoming.title
+  if (same) {
+    return {
+      ...incoming,
+      title,
+      messages: mergeChatHistory(current.messages, incoming.messages),
+    }
+  }
+  return { ...incoming, messages: incoming.messages || [] }
 }
 
 function rememberChat(id: number | string | undefined) {
@@ -229,8 +363,29 @@ function mergeSessionLists(serverList: any[], localList: any[]) {
   })
 }
 
+async function redirectIfSignedOut(router: { push: (href: string) => void }, message: string) {
+  const live = await hasLiveSession()
+  // #region agent log
+  debugAuthLog(
+    'chat/page.tsx:redirectIfSignedOut',
+    live ? 'kept session' : 'redirect login',
+    { ...debugAuthStorageSnapshot(), live },
+    live ? 'B' : 'C'
+  )
+  // #endregion
+  if (live) {
+    showToast('Could not complete that account request. Please try again.', 'warning')
+    return false
+  }
+  showToast(message, 'warning')
+  router.push('/login?redirect=/chat')
+  return true
+}
+
 export default function ChatPage() {
   const { user, isAuthenticated, authReady } = useAuth()
+  const isVendor = useIsVendor()
+  const isSuper = isSuperAdmin(user)
   const router = useRouter()
   const [input, setInput] = useState('')
   const [isLoading, setIsLoading] = useState(false)
@@ -243,38 +398,84 @@ export default function ChatPage() {
   const [backendAvailable, setBackendAvailable] = useState<boolean | null>(null)
   const [searchQuery, setSearchQuery] = useState('')
   const [showSearchModal, setShowSearchModal] = useState(false)
+  const [chatMenuId, setChatMenuId] = useState<string | number | null>(null)
+  const [renamingId, setRenamingId] = useState<string | number | null>(null)
+  const [renameDraft, setRenameDraft] = useState('')
+  const [deleteTarget, setDeleteTarget] = useState<any | null>(null)
+  const [deletingChat, setDeletingChat] = useState(false)
   const [showComposerMenu, setShowComposerMenu] = useState(false)
   const [accountSyncReady, setAccountSyncReady] = useState<boolean | null>(null)
   const [budgetHint, setBudgetHint] = useState('Find products under $500')
   const messagesEndRef = useRef<HTMLDivElement>(null)
+  const latestReplyRef = useRef<HTMLDivElement>(null)
+  const pinnedMessageCountRef = useRef(0)
+  const scrollSessionIdRef = useRef<string | number | null>(null)
   const wsRef = useRef<WebSocket | null>(null)
   const wsSessionIdRef = useRef<number | null>(null)
   const userMenuRef = useRef<HTMLDivElement>(null)
   const userMenuHeaderRef = useRef<HTMLDivElement>(null)
   const userMenuMobileRef = useRef<HTMLDivElement>(null)
+  const chatMenuRef = useRef<HTMLDivElement>(null)
+  const renameInputRef = useRef<HTMLInputElement>(null)
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null)
   const reconnectAttemptsRef = useRef(0)
   const backgroundRetryRef = useRef(0)
   
-  const { currentSession, setCurrentSession, addMessage, setMessages, logout } = useStore()
+  const { currentSession, setCurrentSession, addMessage, setMessages, logout, setAccountView } = useStore()
   const [sessions, setSessions] = useState<any[]>([])
   const [sessionsLoading, setSessionsLoading] = useState(false)
   const [clientReady, setClientReady] = useState(false)
   const currentSessionRef = useRef(currentSession)
   currentSessionRef.current = currentSession
+  const wasAuthedRef = useRef(false)
+  if (isAuthenticated) wasAuthedRef.current = true
   const handleSendRef = useRef<(preset?: string) => Promise<void>>(async () => {})
   const sendLockRef = useRef(false)
+  const ghostToastRef = useRef(false)
   const isLoadingRef = useRef(false)
   const liveAssistantRef = useRef('')
   const chatLoadGenRef = useRef(0)
+  const acceptingReplyRef = useRef(true)
+  const replyIdleRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   isLoadingRef.current = isLoading
+
+  const persistLiveAssistantRef = useRef(() => {})
+
+  const releaseComposer = () => {
+    if (replyIdleRef.current) {
+      clearTimeout(replyIdleRef.current)
+      replyIdleRef.current = null
+    }
+    persistLiveAssistantRef.current()
+    setIsLoading(false)
+    sendLockRef.current = false
+  }
+
+  const armComposerWatch = (ms: number) => {
+    if (replyIdleRef.current) clearTimeout(replyIdleRef.current)
+    replyIdleRef.current = setTimeout(() => {
+      replyIdleRef.current = null
+      persistLiveAssistantRef.current()
+      setIsLoading(false)
+      sendLockRef.current = false
+    }, ms)
+  }
+  const composerCtlRef = useRef({ release: releaseComposer, arm: armComposerWatch })
+  composerCtlRef.current = { release: releaseComposer, arm: armComposerWatch }
+
+  useEffect(() => {
+    return () => {
+      if (replyIdleRef.current) clearTimeout(replyIdleRef.current)
+    }
+  }, [])
 
   const voice = useVoiceChat({
     busy: isLoading,
-    onInterim: (text) => setInput(text),
     onFinalTranscript: (text) => {
-      setInput('')
       void handleSendRef.current(text)
+    },
+    onInterrupt: () => {
+      acceptingReplyRef.current = false
     },
     onError: (message) => showToast(message, 'error'),
   })
@@ -389,9 +590,45 @@ export default function ChatPage() {
       console.error('Failed to sync chat:', error)
     }
   }
+  persistLiveAssistantRef.current = () => {
+    const session = currentSessionRef.current
+    const text = liveAssistantRef.current
+    if (!session || !text || text === '...') return
+    void persistAccountMessage(session, 'assistant', text, session.title)
+  }
 
   const sessionLabel = (session: any) =>
     session?.title?.trim() || `Chat ${session?.id ?? ''}`
+
+  useEffect(() => {
+    const next = uniquifySessionTitles(sessions)
+    const changed = next.some((item, index) => item.title !== sessions[index]?.title)
+    if (!changed) return
+    setSessions(next)
+    const current = currentSessionRef.current
+    if (current) {
+      const updated = next.find((item) => sameChatId(item.id, current.id))
+      if (updated && updated.title !== current.title) {
+        useStore.setState((state) => {
+          if (!state.currentSession || !sameChatId(state.currentSession.id, updated.id)) return {}
+          return { currentSession: { ...state.currentSession, title: updated.title } }
+        })
+      }
+    }
+    next.forEach((session) => {
+      const previous = sessions.find((item) => sameChatId(item.id, session.id))
+      if (!previous || previous.title === session.title) return
+      if (isCloudSessionId(session.id)) {
+        void updateCloudSession(session.id, { title: session.title }).catch(() => {})
+      }
+    })
+  }, [sessions])
+
+  useEffect(() => {
+    if (renamingId == null) return
+    renameInputRef.current?.focus()
+    renameInputRef.current?.select()
+  }, [renamingId])
 
   useEffect(() => {
     setClientReady(true)
@@ -402,20 +639,17 @@ export default function ChatPage() {
 
   useEffect(() => {
     if (!authReady) return
-    if (user?.role === 'vendor') {
-      router.replace('/vendor')
-    }
-  }, [authReady, user?.role, router])
+    if (isVendor) setAccountView('buyer')
+  }, [authReady, isVendor, setAccountView])
 
   useEffect(() => {
     if (!authReady) return
-    if (user?.role === 'vendor') return
     let cancelled = false
 
     const initGuest = () => {
       let parsed: any[] = []
       try {
-        const localSessions = localStorage.getItem('temp_chat_sessions')
+      const localSessions = localStorage.getItem('temp_chat_sessions')
         parsed = localSessions ? JSON.parse(localSessions) : []
         if (!Array.isArray(parsed)) parsed = []
       } catch {
@@ -448,6 +682,19 @@ export default function ChatPage() {
       setSessions(ordered)
       localStorage.setItem('temp_chat_sessions', JSON.stringify(ordered))
       if (!current || isServerSession(current.id)) {
+        // #region agent log
+        debugAuthLog(
+          'chat/page.tsx:initGuest',
+          'replacing session with guest chat',
+          {
+            hadCurrent: Boolean(current),
+            replacingServer: Boolean(current && isServerSession(current.id)),
+            prevMessageCount: current?.messages?.length ?? 0,
+            nextMessageCount: (ordered.find((item) => item.id === readLastChatId()) || ordered[0])?.messages?.length ?? 0,
+          },
+          'C'
+        )
+        // #endregion
         const lastId = readLastChatId()
         const preferred =
           ordered.find((item) => item.id === lastId) || ordered[0]
@@ -478,14 +725,17 @@ export default function ChatPage() {
             list[0]
           if (!stillActive()) return
           setSessions(list)
-          setCurrentSession({ ...preferred, messages: preferred.messages || [] } as any)
+          const current = currentSessionRef.current
+          setCurrentSession(
+            applyCloudSession(current, { ...preferred, messages: preferred.messages || [] }) as any
+          )
           rememberChat(preferred.id)
           setSessionsLoading(false)
 
           void getCloudSession(preferred.id).then((full) => {
             if (!stillActive() || !full) return
             if (sameChatId(currentSessionRef.current?.id, full.id)) {
-              setCurrentSession(full as any)
+              setCurrentSession(applyCloudSession(currentSessionRef.current, full) as any)
             }
           })
 
@@ -588,8 +838,26 @@ export default function ChatPage() {
       }
     }
 
+    // #region agent log
+    debugAuthLog(
+      'chat/page.tsx:sessionInit',
+      isAuthenticated ? 'init authed chats' : 'init guest chats',
+      {
+        ...debugAuthStorageSnapshot(),
+        isAuthenticated,
+        authReady,
+        sessionId: String(currentSessionRef.current?.id ?? ''),
+        messageCount: currentSessionRef.current?.messages?.length ?? 0,
+        voiceMode: voice.voiceMode,
+        keepConversation: Boolean(!isAuthenticated && wasAuthedRef.current && currentSessionRef.current),
+      },
+      'C'
+    )
+    // #endregion
     if (isAuthenticated) {
       void initAuthed()
+    } else if (wasAuthedRef.current && currentSessionRef.current) {
+      // Unexpected auth drop: keep the live conversation and voice overlay.
     } else {
       initGuest()
     }
@@ -616,8 +884,8 @@ export default function ChatPage() {
           const current = currentSessionRef.current
           if (current && isCloudSessionId(current.id)) {
             const full = await getCloudSession(current.id)
-            if (!cancelled && full && !isLoadingRef.current) {
-              setCurrentSession(full as any)
+            if (!cancelled && full && sameChatId(currentSessionRef.current?.id, full.id)) {
+              setCurrentSession(applyCloudSession(currentSessionRef.current, full) as any)
             }
           }
         } catch (error) {
@@ -679,9 +947,9 @@ export default function ChatPage() {
       wsRef.current.readyState === WebSocket.OPEN &&
       wsSessionIdRef.current === sessionId
     ) {
-      setWsConnected(true)
-      return
-    }
+        setWsConnected(true)
+        return
+      }
 
     if (wsRef.current && wsSessionIdRef.current !== sessionId) {
       try {
@@ -693,28 +961,28 @@ export default function ChatPage() {
       wsSessionIdRef.current = null
     }
 
-    const connect = async () => {
-      try {
-        const connected = await connectWebSocket(sessionId, 0, false)
-        if (!connected) {
-          setTimeout(() => {
+      const connect = async () => {
+        try {
+          const connected = await connectWebSocket(sessionId, 0, false)
+          if (!connected) {
+            setTimeout(() => {
             if (matchesWsSession(currentSessionRef.current, sessionId) && isAuthenticated) {
+                connectWebSocket(sessionId, 0, true)
+              }
+            }, 2000)
+          }
+        } catch (error) {
+          console.error('Failed to connect WebSocket:', error)
+          setWsConnected(false)
+          setIsReconnecting(false)
+          setTimeout(() => {
+          if (matchesWsSession(currentSessionRef.current, sessionId) && isAuthenticated) {
               connectWebSocket(sessionId, 0, true)
             }
-          }, 2000)
+          }, 3000)
         }
-      } catch (error) {
-        console.error('Failed to connect WebSocket:', error)
-        setWsConnected(false)
-        setIsReconnecting(false)
-        setTimeout(() => {
-          if (matchesWsSession(currentSessionRef.current, sessionId) && isAuthenticated) {
-            connectWebSocket(sessionId, 0, true)
-          }
-        }, 3000)
       }
-    }
-    connect()
+      connect()
 
     return () => {
       // Don't close on unmount if we're just refreshing - let it reconnect
@@ -727,8 +995,23 @@ export default function ChatPage() {
   }, [authReady, isAuthenticated, currentSession?.id])
 
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [currentSession?.messages])
+    const sessionId = currentSession?.id ?? null
+    const messages = currentSession?.messages || []
+    if (scrollSessionIdRef.current !== sessionId) {
+      scrollSessionIdRef.current = sessionId
+      pinnedMessageCountRef.current = messages.length
+      messagesEndRef.current?.scrollIntoView({ behavior: 'auto', block: 'end' })
+      return
+    }
+    if (messages.length <= pinnedMessageCountRef.current) return
+    pinnedMessageCountRef.current = messages.length
+    const last = messages[messages.length - 1]
+    if (last?.role === 'assistant') {
+      latestReplyRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+      return
+    }
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' })
+  }, [currentSession?.id, currentSession?.messages])
 
   // Reconnect WebSocket when page becomes visible (handles tab switching and refresh)
   useEffect(() => {
@@ -768,11 +1051,12 @@ export default function ChatPage() {
     }
   }, [isAuthenticated, currentSession?.id])
 
-  const createNewSession = async () => {
+  const createNewSession = async (force = false) => {
     if (!authReady) return
     setShowSidebar(false)
 
     const blankInSidebar =
+      !force &&
       isBlankChat(currentSession) &&
       sessions.some((item) => sameChatId(item.id, currentSession?.id))
     if (blankInSidebar) {
@@ -783,23 +1067,21 @@ export default function ChatPage() {
     if (!isAuthenticated) {
       const localSessions = localStorage.getItem('temp_chat_sessions')
       const existingSessions = localSessions ? JSON.parse(localSessions) : []
-      const chatLimit = 5
-
-      if (existingSessions.length >= chatLimit) {
-        showToast('Chat limit reached. Please login for unlimited chats.', 'warning')
-        router.push('/login?redirect=/chat')
+      
+      if (countGuestChats(existingSessions) >= GUEST_CHAT_LIMIT) {
+        showToast('Login to start more chats.', 'warning')
         return
       }
 
       const tempSession = makeLocalSession()
       const updatedSessions = [tempSession, ...existingSessions]
-      localStorage.setItem('temp_chat_sessions', JSON.stringify(updatedSessions))
-      setCurrentSession(tempSession as any)
-      setSessions(updatedSessions)
+        localStorage.setItem('temp_chat_sessions', JSON.stringify(updatedSessions))
+        setCurrentSession(tempSession as any)
+        setSessions(updatedSessions)
       rememberChat(tempSession.id)
       setProductResults([])
-      return
-    }
+        return
+      }
 
     try {
       let legacyId: number | null = null
@@ -830,8 +1112,7 @@ export default function ChatPage() {
       setProductResults([])
     } catch (error: any) {
       if (error.response?.status === 401) {
-        showToast('Please login to create new chats', 'warning')
-        router.push('/login?redirect=/chat')
+        await redirectIfSignedOut(router, 'Please login to create new chats')
       } else {
         console.error('Failed to create session:', error)
         try {
@@ -859,7 +1140,7 @@ export default function ChatPage() {
       try {
         const session = await getCloudSession(sessionId)
         if (session) {
-          setCurrentSession(session as any)
+          setCurrentSession(applyCloudSession(currentSessionRef.current, session) as any)
           setSessions((prev) =>
             prev.map((item) =>
               sameChatId(item.id, session.id)
@@ -870,7 +1151,7 @@ export default function ChatPage() {
           setProductResults([])
           return
         }
-      } catch (error) {
+    } catch (error) {
         console.error('Failed to load synced chat:', error)
       }
       if (cached) {
@@ -905,13 +1186,275 @@ export default function ChatPage() {
       setProductResults([])
     } catch (error: any) {
       if (error.response?.status === 401) {
-        showToast('Please login to view chat history', 'warning')
-        router.push('/login?redirect=/chat')
+        await redirectIfSignedOut(router, 'Please login to view chat history')
       } else {
         console.error('Failed to load session:', error)
         showToast('Could not open that chat.', 'error')
       }
     }
+  }
+
+  const deleteChat = async (session: any) => {
+    if (!session?.id || deletingChat) return
+    const id = session.id
+    const legacyId = isServerSession(session.legacy_id)
+      ? session.legacy_id
+      : isServerSession(id)
+        ? id
+        : null
+    setDeletingChat(true)
+    try {
+      let cloudFailed = false
+      if (isAuthenticated && isCloudSessionId(id)) {
+        try {
+          await deleteCloudSession(String(id))
+        } catch (error) {
+          cloudFailed = true
+          console.error('Failed to delete synced chat:', error)
+        }
+      }
+      let apiFailed = false
+      if (isAuthenticated && legacyId) {
+        try {
+          await chatAPI.deleteSession(legacyId)
+        } catch (error) {
+          apiFailed = true
+          console.error('Failed to delete API chat:', error)
+        }
+      }
+      const remoteFailed =
+        isAuthenticated &&
+        ((isCloudSessionId(id) && cloudFailed && (!legacyId || apiFailed)) ||
+          (!isCloudSessionId(id) && Boolean(legacyId) && apiFailed))
+      if (remoteFailed) {
+        showToast('Could not delete that chat.', 'error')
+        return
+      }
+      const remaining = sessions.filter(
+        (item) => !sameChatId(item.id, id) && !sameChatId(item.legacy_id, id)
+      )
+      if (!isAuthenticated) {
+        writeStoredSessions(GUEST_CHATS_KEY, remaining)
+      }
+      setSessions(remaining)
+      const deletingCurrent =
+        sameChatId(currentSession?.id, id) || sameChatId(currentSession?.legacy_id, id)
+      if (deletingCurrent) {
+        if (wsRef.current) {
+          try {
+            wsRef.current.close(1000, 'Chat deleted')
+          } catch {
+            // ignore
+          }
+          wsRef.current = null
+        }
+        if (voice.voiceMode) voice.stopVoice()
+        setProductResults([])
+        if (remaining[0]) {
+          await selectSession(remaining[0].id)
+        } else {
+          setCurrentSession(null)
+          await createNewSession(true)
+        }
+      }
+      showToast('Chat deleted', 'success')
+    } catch (error) {
+      console.error('Failed to delete chat:', error)
+      showToast('Could not delete that chat.', 'error')
+    } finally {
+      setDeletingChat(false)
+      setDeleteTarget(null)
+      setChatMenuId(null)
+    }
+  }
+
+  const openDeleteChat = (session: any) => {
+    setChatMenuId(null)
+    setDeleteTarget(session)
+  }
+
+  const openRenameChat = (session: any) => {
+    setChatMenuId(null)
+    setShowSidebar(true)
+    setRenamingId(session.id)
+    setRenameDraft(sessionLabel(session))
+  }
+
+  const renameChat = async (session: any, rawTitle: string) => {
+    if (!session) {
+      setRenamingId(null)
+      return
+    }
+    const draft = (rawTitle || '').trim()
+    if (!draft) {
+      setRenamingId(null)
+      return
+    }
+    const existing = sessions
+      .filter((item) => !sameChatId(item.id, session.id))
+      .map((item) => item.title || '')
+    const title = uniqueChatTitle(draft, existing)
+    lockChatTitle(session.id)
+    const now = new Date().toISOString()
+    setRenamingId(null)
+    setChatMenuId(null)
+    setSessions((prev) =>
+      prev.map((item) => (sameChatId(item.id, session.id) ? { ...item, title, updated_at: now } : item))
+    )
+    if (sameChatId(currentSessionRef.current?.id, session.id)) {
+      useStore.setState((state) => {
+        if (!state.currentSession || !sameChatId(state.currentSession.id, session.id)) return {}
+        return { currentSession: { ...state.currentSession, title, updated_at: now } }
+      })
+    }
+    try {
+      if (isCloudSessionId(session.id)) {
+        await updateCloudSession(session.id, { title })
+      } else if (isServerSession(session.id)) {
+        await chatAPI.renameSession(session.id, title)
+      } else if (isServerSession(session.legacy_id)) {
+        await chatAPI.renameSession(session.legacy_id, title)
+      } else {
+        persistGuestSessions({ ...session, title, updated_at: now })
+      }
+    } catch (error) {
+      console.error('Failed to rename chat:', error)
+      showToast('Could not save the chat name.', 'error')
+    }
+  }
+
+  const applyRemoteTitle = (sid: number, incoming: string) => {
+    const current = currentSessionRef.current
+    if (current && matchesWsSession(current, sid) && isChatTitleLocked(current.id)) return
+    setSessions((prev) => {
+      const match = prev.find((item) => matchesWsSession(item, sid))
+      if (match && isChatTitleLocked(match.id)) return prev
+      const others = prev.filter((item) => !matchesWsSession(item, sid)).map((item) => item.title || '')
+      const title = uniqueChatTitle(incoming, others)
+      return prev.map((item) => (matchesWsSession(item, sid) ? { ...item, title } : item))
+    })
+    if (current && matchesWsSession(current, sid)) {
+      useStore.setState((state) => {
+        if (!state.currentSession || !matchesWsSession(state.currentSession, sid)) return {}
+        if (isChatTitleLocked(state.currentSession.id)) return {}
+        const others = sessions
+          .filter((item) => !matchesWsSession(item, sid))
+          .map((item) => item.title || '')
+        return {
+          currentSession: {
+            ...state.currentSession,
+            title: uniqueChatTitle(incoming, others),
+          },
+        }
+      })
+    }
+  }
+
+  const renderChatRow = (session: any, inModal = false) => {
+    const selected = sameChatId(currentSession?.id, session.id)
+    const menuOpen = sameChatId(chatMenuId, session.id)
+    const renaming = sameChatId(renamingId, session.id)
+    return (
+      <div
+        key={session.id}
+        ref={menuOpen ? chatMenuRef : undefined}
+        className={`group relative mb-1 rounded-lg ${
+          selected ? 'bg-[#2f2f2f]' : inModal ? 'hover:bg-[#3d3d3d]' : 'hover:bg-[#2f2f2f]'
+        }`}
+      >
+        {renaming ? (
+          <form
+            onSubmit={(event) => {
+              event.preventDefault()
+              void renameChat(session, renameDraft)
+            }}
+            className="flex items-center gap-2 px-3 py-1.5"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <MessageSquare className="w-4 h-4 text-[#b4b4b4] flex-shrink-0" />
+            <input
+              ref={renameInputRef}
+              value={renameDraft}
+              onChange={(event) => setRenameDraft(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') {
+                  event.preventDefault()
+                  event.stopPropagation()
+                  void renameChat(session, event.currentTarget.value)
+                }
+                if (event.key === 'Escape') {
+                  event.preventDefault()
+                  setRenamingId(null)
+                }
+              }}
+              onBlur={(event) => void renameChat(session, event.currentTarget.value)}
+              maxLength={60}
+              aria-label="Chat name"
+              className="min-w-0 flex-1 bg-[#1a1a1a] text-sm text-[#ececec] rounded-md px-2 py-1 outline-none border border-[#4d4d4d]"
+            />
+          </form>
+        ) : (
+          <>
+        <button
+          type="button"
+          onClick={() => {
+            selectSession(session.id)
+            setSearchQuery('')
+            setChatMenuId(null)
+            if (inModal) setShowSearchModal(false)
+          }}
+          className={`w-full text-left px-3 py-2.5 pr-10 rounded-lg transition-colors ${
+            inModal ? 'text-[#ececec]' : ''
+          }`}
+        >
+          <p className="text-sm text-[#ececec] truncate flex items-center">
+            <MessageSquare className="w-4 h-4 mr-2 text-[#b4b4b4] flex-shrink-0" />
+            <span className="truncate">{sessionLabel(session)}</span>
+          </p>
+        </button>
+        <button
+          type="button"
+          aria-label="Chat options"
+          onClick={(event) => {
+            event.stopPropagation()
+            setChatMenuId(menuOpen ? null : session.id)
+          }}
+          className={`absolute right-1 top-1/2 -translate-y-1/2 h-8 w-8 inline-flex items-center justify-center rounded-md text-[#b4b4b4] hover:bg-[#3d3d3d] hover:text-[#ececec] ${
+            menuOpen ? 'opacity-100' : 'opacity-100 md:opacity-0 md:group-hover:opacity-100'
+          }`}
+        >
+          <MoreHorizontal className="w-4 h-4" />
+        </button>
+        {menuOpen ? (
+          <div className="absolute right-1 top-full z-30 mt-1 w-40 rounded-xl border border-[#3d3d3d] bg-[#2f2f2f] py-1 shadow-lg">
+            <button
+              type="button"
+              onClick={(event) => {
+                event.stopPropagation()
+                openRenameChat(session)
+              }}
+              className="w-full flex items-center gap-2 px-3 py-2 text-sm text-[#ececec] hover:bg-[#3d3d3d] text-left"
+            >
+              <Pencil className="w-4 h-4" />
+              Rename
+            </button>
+            <button
+              type="button"
+              onClick={(event) => {
+                event.stopPropagation()
+                openDeleteChat(session)
+              }}
+              className="w-full flex items-center gap-2 px-3 py-2 text-sm text-red-400 hover:bg-[#3d3d3d] text-left"
+            >
+              <Trash2 className="w-4 h-4" />
+              Delete
+            </button>
+          </div>
+        ) : null}
+          </>
+        )}
+      </div>
+    )
   }
 
   const connectWebSocket = async (sessionId: number, retryCount = 0, isReconnect = false): Promise<boolean> => {
@@ -920,6 +1463,9 @@ export default function ChatPage() {
     // Get fresh session token
     const token = (await getAccessToken()) || ''
     if (!token) {
+      // #region agent log
+      fetch('http://127.0.0.1:7822/ingest/99b396db-6f63-4207-97c0-0286dee5a836',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'53a75c'},body:JSON.stringify({sessionId:'53a75c',runId:'voice-monitor-2',hypothesisId:'I',location:'chat/page.tsx:connectWebSocket',message:'no auth token',data:{sessionId,isReconnect,isAuthenticated},timestamp:Date.now()})}).catch(()=>{})
+      // #endregion
       console.warn('No auth token available, user may need to login')
       if (isAuthenticated) {
         // If we think we're authenticated but have no token, try refreshing
@@ -949,7 +1495,7 @@ export default function ChatPage() {
         resolve(true)
         return
       }
-
+    
       if (wsRef.current) {
         try {
           wsRef.current.close(1000, 'Reconnecting')
@@ -1000,8 +1546,20 @@ export default function ChatPage() {
         if (wsRef.current !== ws || !matchesWsSession(currentSessionRef.current, sessionId)) return
         try {
       const data = JSON.parse(event.data)
+      if (
+        !acceptingReplyRef.current &&
+        data.type !== 'typing' &&
+        data.type !== 'title' &&
+        data.type !== 'done' &&
+        data.type !== 'error' &&
+        !data.error
+      ) {
+        return
+      }
       
       if (data.type === 'typing') {
+        acceptingReplyRef.current = true
+        composerCtlRef.current.arm(25000)
         if (data.status) {
           liveAssistantRef.current = ''
           setMessages((prev) => {
@@ -1038,39 +1596,28 @@ export default function ChatPage() {
         if (liveAssistantRef.current && liveAssistantRef.current !== '...') {
           feedSpokenFn.current(liveAssistantRef.current)
         }
+        composerCtlRef.current.arm(12000)
       } else if (data.type === 'title') {
         if (data.title && wsSessionIdRef.current) {
-          const sid = wsSessionIdRef.current
-          setSessions((prev) =>
-            prev.map((item) => (matchesWsSession(item, sid) ? { ...item, title: data.title } : item))
-          )
-          const current = currentSessionRef.current
-          if (current && matchesWsSession(current, sid)) {
-            setCurrentSession({
-              ...current,
-              title: data.title,
-              messages: current.messages || [],
-            })
-          }
+          applyRemoteTitle(wsSessionIdRef.current, data.title)
         }
       } else if (data.type === 'done') {
-        setIsLoading(false)
+        composerCtlRef.current.release()
         if (data.product_results) {
           setProductResults(data.product_results)
         }
+        if (data.quotation) {
+          setMessages((prev) => {
+            const updated = [...prev]
+            const lastMsg = updated[updated.length - 1]
+            if (lastMsg && lastMsg.role === 'assistant') {
+              lastMsg.quotation = data.quotation
+            }
+            return updated
+          })
+        }
         if (data.title && wsSessionIdRef.current) {
-          const sid = wsSessionIdRef.current
-          setSessions((prev) =>
-            prev.map((item) => (matchesWsSession(item, sid) ? { ...item, title: data.title } : item))
-          )
-          const current = currentSessionRef.current
-          if (current && matchesWsSession(current, sid)) {
-            setCurrentSession({
-              ...current,
-              title: data.title,
-              messages: current.messages || [],
-            })
-          }
+          applyRemoteTitle(wsSessionIdRef.current, data.title)
         }
         const sid = wsSessionIdRef.current
         const current = currentSessionRef.current
@@ -1079,7 +1626,7 @@ export default function ChatPage() {
             current,
             'assistant',
             liveAssistantRef.current,
-            data.title || current.title
+            isChatTitleLocked(current.id) ? current.title : data.title || current.title
           )
         }
         if (liveAssistantRef.current && liveAssistantRef.current !== '...') {
@@ -1089,27 +1636,13 @@ export default function ChatPage() {
           chatAPI
             .getSession(sid)
             .then((full) => {
-              if (!full) return
-              setSessions((prev) =>
-                prev.map((item) =>
-                  matchesWsSession(item, full.id)
-                    ? { ...item, title: full.title || item.title, updated_at: full.updated_at }
-                    : item
-                )
-              )
-              const current = currentSessionRef.current
-              if (current && matchesWsSession(current, full.id) && full.title) {
-                setCurrentSession({
-                  ...current,
-                  title: full.title,
-                  messages: current.messages || [],
-                })
-              }
+              if (!full?.title) return
+              applyRemoteTitle(full.id, full.title)
             })
             .catch(() => {})
         }
       } else if (data.type === 'error') {
-        setIsLoading(false)
+        composerCtlRef.current.release()
         console.error('WebSocket error:', data.error)
         const errorMsg = data.error || 'An error occurred. Please try again.'
         showToast(errorMsg, 'error')
@@ -1120,13 +1653,13 @@ export default function ChatPage() {
         }])
       } else if (data.error) {
         // Handle plain error objects
-        setIsLoading(false)
+        composerCtlRef.current.release()
         console.error('WebSocket error:', data.error)
         showToast(data.error, 'error')
       }
         } catch (error) {
           console.error('Error parsing WebSocket message:', error)
-          setIsLoading(false)
+          composerCtlRef.current.release()
       }
     }
 
@@ -1162,7 +1695,15 @@ export default function ChatPage() {
         
         // Don't reconnect for authentication errors
         if (event.code === 1008) {
-          setIsLoading(false)
+          // #region agent log
+          debugAuthLog(
+            'chat/page.tsx:ws',
+            'websocket auth close',
+            { code: event.code, reason: String(event.reason || '').slice(0, 80) },
+            'B'
+          )
+          // #endregion
+          composerCtlRef.current.release()
           setIsReconnecting(false)
           showToast('Authentication failed. Please try logging out and back in.', 'error')
           resolve(false)
@@ -1171,6 +1712,7 @@ export default function ChatPage() {
         
         // Don't reconnect for normal closures
         if (event.code === 1000) {
+          composerCtlRef.current.release()
           setIsReconnecting(false)
           resolve(false)
           return
@@ -1191,7 +1733,7 @@ export default function ChatPage() {
         } else {
           // Max retries reached - but continue trying in background
           setIsReconnecting(false)
-          setIsLoading(false)
+          composerCtlRef.current.release()
           
           if (event.code === 1006) {
             // Connection lost - try to reconnect after checking backend health
@@ -1241,18 +1783,32 @@ export default function ChatPage() {
   }
 
   const handleSend = async (preset?: string) => {
-    voice.stopCapture()
-    if (isLoading || sendLockRef.current) return
     const userMessage = (typeof preset === 'string' ? preset : input || '').trim()
     if (!userMessage) return
+    const fromVoice = typeof preset === 'string' && voice.voiceMode
+    if (isLoadingRef.current || sendLockRef.current) {
+      acceptingReplyRef.current = false
+      sendLockRef.current = false
+      voice.interruptSpeech()
+    }
+    if (!fromVoice) voice.stopCapture()
+    acceptingReplyRef.current = true
+    // #region agent log
+    fetch('http://127.0.0.1:7822/ingest/99b396db-6f63-4207-97c0-0286dee5a836',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'53a75c'},body:JSON.stringify({sessionId:'53a75c',location:'chat/page.tsx:handleSend',message:'send message',data:{fromVoice:typeof preset==='string',voiceMode:voice.voiceMode,listening:voice.listening,speaking:voice.speaking,preview:userMessage.slice(0,180),isLoading},timestamp:Date.now(),hypothesisId:'E'})}).catch(()=>{})
+    // #endregion
     sendLockRef.current = true
 
     let session = currentSession
     if (!session) {
       if (!isAuthenticated) {
-        const tempSession = makeLocalSession()
         const localSessions = localStorage.getItem('temp_chat_sessions')
         const existingSessions = localSessions ? JSON.parse(localSessions) : []
+        if (countGuestChats(existingSessions) >= GUEST_CHAT_LIMIT) {
+          showToast('Login to start more chats.', 'warning')
+          sendLockRef.current = false
+          return
+        }
+        const tempSession = makeLocalSession()
         const updatedSessions = [tempSession, ...existingSessions]
         localStorage.setItem('temp_chat_sessions', JSON.stringify(updatedSessions))
         setCurrentSession(tempSession as any)
@@ -1267,9 +1823,8 @@ export default function ChatPage() {
             legacyId = created.id
           } catch (error: any) {
             if (error.response?.status === 401) {
-              showToast('Please login to send messages', 'warning')
+              await redirectIfSignedOut(router, 'Please login to send messages')
               sendLockRef.current = false
-              router.push('/login?redirect=/chat')
               return
             }
           }
@@ -1296,9 +1851,8 @@ export default function ChatPage() {
           }
         } catch (error: any) {
           if (error.response?.status === 401) {
-            showToast('Please login to send messages', 'warning')
+            await redirectIfSignedOut(router, 'Please login to send messages')
             sendLockRef.current = false
-            router.push('/login?redirect=/chat')
             return
           }
           const tempSession = makeLocalSession()
@@ -1321,7 +1875,19 @@ export default function ChatPage() {
 
     const userMsg = { role: 'user' as const, content: userMessage }
     addMessage(userMsg)
-    const generated = naturalChatTitle(userMessage, session.title)
+    const topicText =
+      [...(session.messages || []), userMsg]
+        .filter((item) => item.role === 'user' && String(item.content || '').trim())
+        .map((item) => String(item.content))
+        .filter((text) => !isSmalltalk(text))
+        .slice(-1)[0] || userMessage
+    const existingTitles = sessions
+      .filter((item) => !sameChatId(item.id, session.id))
+      .map((item) => item.title || '')
+    const generated = naturalChatTitle(topicText, session.title, {
+      existingTitles,
+      locked: isChatTitleLocked(session.id),
+    })
     const nextTitle = generated || session.title || 'New chat'
     setSessions((prev) => {
       const now = new Date().toISOString()
@@ -1339,10 +1905,21 @@ export default function ChatPage() {
         ...rest,
       ]
     })
+    useStore.setState((state) => {
+      if (!state.currentSession || !sameChatId(state.currentSession.id, session.id)) return {}
+      return { currentSession: { ...state.currentSession, title: nextTitle } }
+    })
     void persistAccountMessage(session, 'user', userMessage, nextTitle)
 
+    const token = (await getAccessToken()) || (await ensureFreshSession())
+    const authed = Boolean(token)
+
     // For guests, keep the chat working locally.
-      if (!isAuthenticated) {
+      if (!authed) {
+        if (isAuthenticated && !ghostToastRef.current) {
+          ghostToastRef.current = true
+          showToast('Your login session expired. Log in again for live catalog answers.', 'warning')
+        }
         // Save message to local storage
         const updatedMessages = [...(session?.messages || []), userMsg]
         const updatedSession = {
@@ -1355,30 +1932,7 @@ export default function ChatPage() {
         setSessions(persistGuestSessions(updatedSession))
 
       // Generate helpful AI-like response based on query
-        let response = ""
-        const lowerMessage = userMessage.toLowerCase().trim()
-        const conversationHistory = session?.messages || []
-        const lastFewMessages = conversationHistory.slice(-4).map(m => m.content.toLowerCase())
-        
-        // Greetings and casual conversation
-        if (/^(hello|hi|hey|good morning|good afternoon|good evening|greetings|howdy)$/i.test(lowerMessage) || 
-            lowerMessage.startsWith('hello') || lowerMessage.startsWith('hi ') || lowerMessage.startsWith('hey ')) {
-          response = "Hello! I'm ProcureX, your AI procurement assistant. I can help you find IT products, compare prices, check availability, and connect you with verified vendors. What are you looking for today?"
-        } else if (lowerMessage.includes('how are you') || lowerMessage.includes("how's it going") || lowerMessage.includes('how do you do')) {
-          response = "I'm doing great, thank you for asking! I'm here and ready to help you with your IT procurement needs. What can I assist you with today?"
-        } else if (/^(thanks?|thank you|appreciate it)$/i.test(lowerMessage) || lowerMessage.startsWith('thank')) {
-          response = "You're very welcome! I'm happy to help. To access pricing and vendor information, please login to your account. Is there anything else I can help with?"
-        } else if (lowerMessage.includes('product') || lowerMessage.includes('laptop') || lowerMessage.includes('phone') || lowerMessage.includes('tablet') || lowerMessage.includes('monitor')) {
-          response = "I can help you find IT products! However, to see real-time pricing, availability, and vendor information, please login to your account. Once logged in, I'll instantly show you matching products with prices, stock levels, and verified vendor details. Would you like to login now?"
-        } else if (lowerMessage.includes('quote') || lowerMessage.includes('quotation')) {
-          response = "I can generate professional quotations for you! To create and export quotations, please login to your ProcureX account. After logging in, I can help you build detailed quotes with product specifications, pricing, and vendor information."
-        } else if (lowerMessage.includes('vendor') || lowerMessage.includes('supplier')) {
-          response = "ProcureX connects you with verified vendors for IT products. After you login, I can show you vendor profiles, contact information, product catalogs, and stock availability. This helps ensure you're working with trusted suppliers."
-        } else if (lowerMessage.includes('what can you') || lowerMessage.includes('help me') || lowerMessage.includes('what do you do')) {
-          response = "I'm ProcureX, your AI procurement assistant! Here's what I can help you with:\n\n🔍 **Product Discovery**: Find IT products matching your requirements\n💰 **Pricing Information**: Get current prices from verified vendors\n📊 **Availability Checks**: Check stock levels in real-time\n🏢 **Vendor Connections**: Connect with verified suppliers\n📄 **Quotation Generation**: Create professional procurement quotes\n\nTo access these features, please login to your account. What would you like to know?"
-        } else {
-          response = "I'm here to help with IT procurement! I can assist you with:\n\n• Finding IT products (laptops, phones, tablets, accessories)\n• Comparing prices and specifications\n• Checking availability and stock levels\n• Connecting with verified vendors\n• Generating quotations\n\nTo access pricing and vendor information, please login to your account. What would you like to know?"
-        }
+        const response = cannedAssistantReply(userMessage, { guest: true })
         
           const assistantMsg = { role: 'assistant' as const, content: response }
           addMessage(assistantMsg)
@@ -1393,14 +1947,33 @@ export default function ChatPage() {
           setSessions(persistGuestSessions(finalSession))
           
           setIsLoading(false)
+          sendLockRef.current = false
           speakReplyFn.current(response)
       return
     }
 
     // Authenticated users: Try WebSocket first, fallback to REST API
     try {
-      const wsId = accountWsId(session)
-      const connected = wsId ? await connectWebSocket(wsId) : false
+      let wsId = accountWsId(session)
+      if (!wsId && token) {
+        try {
+          const created = await chatAPI.createSession(nextTitle || session?.title || 'Voice chat')
+          wsId = created.id
+          const next = {
+            ...session,
+            id: isServerSession(session?.id) ? session.id : created.id,
+            legacy_id: created.id,
+          }
+          session = next
+          setCurrentSession(next as any)
+        } catch {
+          wsId = null
+        }
+      }
+      const connected = token && wsId ? await connectWebSocket(wsId) : false
+      // #region agent log
+      fetch('http://127.0.0.1:7822/ingest/99b396db-6f63-4207-97c0-0286dee5a836',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'53a75c'},body:JSON.stringify({sessionId:'53a75c',runId:'voice-monitor-2',hypothesisId:'I',location:'chat/page.tsx:handleSend:ws',message:'ws path',data:{hasWsId:Boolean(wsId),idKind:typeof session?.id==='number'?'number':typeof session?.id,idLen:typeof session?.id==='string'?session.id.length:0,hasLegacy:Boolean(session?.legacy_id),connected,readyState:wsRef.current?.readyState??null,hasToken:Boolean(await getAccessToken())},timestamp:Date.now()})}).catch(()=>{})
+      // #endregion
       
       if (connected && wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
         const money = getDisplayCurrencyNow()
@@ -1411,14 +1984,70 @@ export default function ChatPage() {
           currency_symbol: money.symbol,
           country: money.country,
           local_per_ngn: money.localPerNgn,
+          ...quoteScopePayload(),
         }))
+        armComposerWatch(25000)
         return
       }
 
-      // Fallback to REST API with simulated streaming
+      // Fallback to REST API with live generate, then canned scripts
       console.log('WebSocket not available, using REST API fallback')
       
-      // Save message via REST API
+      const applyAssistant = async (assistantResponse: string, extra?: { title?: string; product_results?: any[]; quotation?: any; saved?: boolean }) => {
+        addMessage({ role: 'assistant' as const, content: assistantResponse, quotation: extra?.quotation })
+        if (extra?.product_results) setProductResults(extra.product_results)
+        const title = isChatTitleLocked(session.id)
+          ? nextTitle
+          : uniqueChatTitle(extra?.title || nextTitle, existingTitles)
+        if (title !== nextTitle) {
+          setSessions((prev) =>
+            prev.map((item) => (sameChatId(item.id, session.id) ? { ...item, title } : item))
+          )
+          useStore.setState((state) => {
+            if (!state.currentSession || !sameChatId(state.currentSession.id, session.id)) return {}
+            return { currentSession: { ...state.currentSession, title } }
+          })
+        }
+        setIsLoading(false)
+        sendLockRef.current = false
+        speakReplyFn.current(assistantResponse)
+        void persistAccountMessage(session, 'assistant', assistantResponse, title)
+        if (wsId && !extra?.saved) {
+          try {
+            await chatAPI.createMessage(wsId, assistantResponse, 'assistant')
+          } catch (error) {
+            console.error('Failed to save assistant message:', error)
+          }
+        }
+      }
+
+      if (wsId && token) {
+        try {
+          const money = getDisplayCurrencyNow()
+          const reply = await chatAPI.generateReply(wsId, {
+            message: userMessage,
+            voice: Boolean(voice.voiceMode),
+            currency: money.currency,
+            currency_symbol: money.symbol,
+            local_per_ngn: money.localPerNgn,
+            country: money.country,
+            ...quoteScopePayload(),
+          })
+          const assistantResponse = String(reply?.content || '').trim()
+          if (assistantResponse) {
+            await applyAssistant(assistantResponse, {
+              title: isChatTitleLocked(session.id) ? nextTitle : reply.title || nextTitle,
+              product_results: reply.product_results,
+              quotation: reply.quotation,
+              saved: true,
+            })
+            return
+          }
+        } catch (error) {
+          console.error('REST generate failed:', error)
+        }
+      }
+
       try {
         if (wsId) await chatAPI.createMessage(wsId, userMessage)
       } catch (e) {
@@ -1426,127 +2055,10 @@ export default function ChatPage() {
       }
 
       try {
-        let assistantResponse = ""
-        const lowerMessage = userMessage.toLowerCase().trim()
-        const priceRange = catalogPriceRangeLabel()
-        
-        // Get conversation context
-        const conversationHistory = session?.messages || []
-        const lastFewMessages = conversationHistory.slice(-4).map(m => m.content.toLowerCase())
-        
-        // Greetings and casual conversation
-        if (/^(hello|hi|hey|good morning|good afternoon|good evening|greetings|howdy)$/i.test(lowerMessage) || 
-            lowerMessage.startsWith('hello') || lowerMessage.startsWith('hi ') || lowerMessage.startsWith('hey ')) {
-          assistantResponse = "Hello! I'm ProcureX, your AI procurement assistant. I can help you find IT products, compare prices, check availability, and connect you with verified vendors. What are you looking for today?"
-        } 
-        // How are you / how's it going
-        else if (lowerMessage.includes('how are you') || lowerMessage.includes("how's it going") || lowerMessage.includes('how do you do')) {
-          assistantResponse = "I'm doing great, thank you for asking! I'm here and ready to help you with your IT procurement needs. What can I assist you with today?"
-        }
-        // Thank you / thanks
-        else if (/^(thanks?|thank you|appreciate it)$/i.test(lowerMessage) || lowerMessage.startsWith('thank')) {
-          assistantResponse = "You're very welcome! I'm happy to help. Is there anything else you'd like to know about our products or services?"
-        }
-        // Product queries - laptop
-        else if (lowerMessage.includes('laptop') || lowerMessage.includes('computer') || lowerMessage.includes('notebook')) {
-          // Check if it's about age/kids
-          if (lowerMessage.includes('12') || lowerMessage.includes('kid') || lowerMessage.includes('child') || lowerMessage.includes('son') || lowerMessage.includes('daughter')) {
-            assistantResponse = `I can help you find the perfect laptop! For a 12-year-old, I'd recommend:\n\n**Educational Laptops (Budget-friendly):**\n• 13-15 inch screen size\n• 8GB RAM minimum\n• 256GB storage\n• Intel Core i3/i5 or AMD Ryzen 3/5\n• Lightweight for carrying to school\n\n**Key Considerations:**\n• Durability and build quality\n• Good battery life\n• Suitable for schoolwork, light gaming, and creative projects\n• Parental controls and safety features\n\n**Price Range:** ${priceRange}\n\nWould you like me to show you specific laptop models that match these criteria? I can search our catalog for verified vendors with current pricing and availability.`
-          } else {
-            assistantResponse = `I can help you find the perfect laptop! To recommend the best option, I need to know:\n\n• What will you primarily use it for? (work, gaming, school, creative tasks)\n• Budget range\n• Any specific requirements? (screen size, RAM, storage, portability)\n\nOnce you share these details, I'll search our catalog and show you matching laptops with prices, specifications, and vendor information. What's your budget range?`
-          }
-        }
-        // Product queries - phone
-        else if (lowerMessage.includes('phone') || lowerMessage.includes('smartphone') || lowerMessage.includes('mobile')) {
-          assistantResponse = "I can help you find a suitable phone! To recommend the best options, tell me:\n\n• What features are important to you? (camera, battery life, performance)\n• Budget range\n• Brand preferences (if any)\n• Intended use (calls, social media, gaming, work)\n\nWould you like me to search for available phones with current pricing?"
-        }
-        // Product queries - general
-        else if (lowerMessage.includes('product') || lowerMessage.includes('item') || lowerMessage.includes('buy') || lowerMessage.includes('purchase')) {
-          assistantResponse = "I can help you find IT products! What specifically are you looking for?\n\n• Product type (laptops, phones, tablets, monitors, accessories, etc.)\n• Specifications or features you need\n• Budget range\n• Quantity needed\n\nOnce you provide these details, I'll search our catalog and show you matching products with real-time pricing and vendor information!"
-        }
-        // Price queries
-        else if (lowerMessage.includes('price') || lowerMessage.includes('cost') || lowerMessage.includes('how much') || lowerMessage.includes('pricing')) {
-          assistantResponse = "I can help you get pricing information! To provide accurate prices for IT products, I need to know:\n\n• What product are you interested in?\n• Any specific specifications or brand preferences?\n• Quantity needed?\n\nOnce you provide these details, I'll search our database and show you current prices from verified vendors along with availability."
-        }
-        // What can you do / help
-        else if (lowerMessage.includes('what can you') || lowerMessage.includes('help me') || lowerMessage.includes('what do you do') || lowerMessage.includes('capabilities')) {
-          assistantResponse = "I'm ProcureX, your AI procurement assistant! Here's what I can help you with:\n\n🔍 **Product Discovery**: Find IT products matching your requirements\n💰 **Pricing Information**: Get current prices from verified vendors\n📊 **Availability Checks**: Check stock levels in real-time\n🏢 **Vendor Connections**: Connect with verified suppliers\n📄 **Quotation Generation**: Create professional procurement quotes\n📋 **Product Comparison**: Compare specifications and prices\n✨ **Smart Recommendations**: Get AI-powered product suggestions\n\nJust tell me what you're looking for, and I'll help you find it quickly!"
-        }
-        // Default contextual response
-        else {
-          // Check conversation context to provide more relevant response
-          if (lastFewMessages.some(m => m.includes('laptop') || m.includes('computer'))) {
-            assistantResponse = "I'd be happy to help you with laptop recommendations! Could you tell me more about:\n\n• Your budget range\n• Primary use case (work, gaming, school, etc.)\n• Any specific requirements?\n\nThis will help me find the perfect laptop for you!"
-          } else if (lastFewMessages.some(m => m.includes('phone') || m.includes('mobile'))) {
-            assistantResponse = "I can help you find the perfect phone! What specific features or budget are you looking for?"
-          } else {
-            assistantResponse = "I'm here to help with your IT procurement needs! I can assist you with finding products, checking prices, verifying vendors, and generating quotations.\n\nWhat would you like to do today? You can ask me about:\n\n• Specific IT products (laptops, phones, tablets, etc.)\n• Product availability and pricing\n• Vendor information\n• Creating quotations\n\nJust let me know what you need!"
-          }
-        }
-
-        addMessage({ role: 'assistant' as const, content: assistantResponse })
-
-        setIsLoading(false)
-        speakReplyFn.current(assistantResponse)
-        void persistAccountMessage(session, 'assistant', assistantResponse, nextTitle)
-        if (wsId) {
-          try {
-            await chatAPI.createMessage(wsId, assistantResponse, 'assistant')
-          } catch (error) {
-            console.error('Failed to save assistant message:', error)
-          }
-        }
+        await applyAssistant(cannedAssistantReply(userMessage, { guest: false }))
       } catch (apiError: any) {
         console.error('API error:', apiError)
-        // Use same intelligent fallback as above
-        let assistantResponse = ""
-        const lowerMessage = userMessage.toLowerCase().trim()
-        const conversationHistory = session?.messages || []
-        const lastFewMessages = conversationHistory.slice(-4).map(m => m.content.toLowerCase())
-        const priceRange = catalogPriceRangeLabel()
-        
-        // Use same logic as above
-        if (/^(hello|hi|hey|good morning|good afternoon|good evening|greetings|howdy)$/i.test(lowerMessage) || 
-            lowerMessage.startsWith('hello') || lowerMessage.startsWith('hi ') || lowerMessage.startsWith('hey ')) {
-          assistantResponse = "Hello! I'm ProcureX, your AI procurement assistant. I can help you find IT products, compare prices, check availability, and connect you with verified vendors. What are you looking for today?"
-        } else if (lowerMessage.includes('how are you') || lowerMessage.includes("how's it going") || lowerMessage.includes('how do you do')) {
-          assistantResponse = "I'm doing great, thank you for asking! I'm here and ready to help you with your IT procurement needs. What can I assist you with today?"
-        } else if (/^(thanks?|thank you|appreciate it)$/i.test(lowerMessage) || lowerMessage.startsWith('thank')) {
-          assistantResponse = "You're very welcome! I'm happy to help. Is there anything else you'd like to know about our products or services?"
-        } else if (lowerMessage.includes('laptop') || lowerMessage.includes('computer') || lowerMessage.includes('notebook')) {
-          if (lowerMessage.includes('12') || lowerMessage.includes('kid') || lowerMessage.includes('child') || lowerMessage.includes('son') || lowerMessage.includes('daughter')) {
-            assistantResponse = `I can help you find the perfect laptop! For a 12-year-old, I'd recommend:\n\n**Educational Laptops (Budget-friendly):**\n• 13-15 inch screen size\n• 8GB RAM minimum\n• 256GB storage\n• Intel Core i3/i5 or AMD Ryzen 3/5\n• Lightweight for carrying to school\n\n**Key Considerations:**\n• Durability and build quality\n• Good battery life\n• Suitable for schoolwork, light gaming, and creative projects\n• Parental controls and safety features\n\n**Price Range:** ${priceRange}\n\nWould you like me to show you specific laptop models that match these criteria? I can search our catalog for verified vendors with current pricing and availability.`
-          } else {
-            assistantResponse = `I can help you find the perfect laptop! To recommend the best option, I need to know:\n\n• What will you primarily use it for? (work, gaming, school, creative tasks)\n• Budget range\n• Any specific requirements? (screen size, RAM, storage, portability)\n\nOnce you share these details, I'll search our catalog and show you matching laptops with prices, specifications, and vendor information. What's your budget range?`
-          }
-        } else if (lowerMessage.includes('phone') || lowerMessage.includes('smartphone') || lowerMessage.includes('mobile')) {
-          assistantResponse = "I can help you find a suitable phone! To recommend the best options, tell me:\n\n• What features are important to you? (camera, battery life, performance)\n• Budget range\n• Brand preferences (if any)\n• Intended use (calls, social media, gaming, work)\n\nWould you like me to search for available phones with current pricing?"
-        } else if (lowerMessage.includes('product') || lowerMessage.includes('item') || lowerMessage.includes('buy') || lowerMessage.includes('purchase')) {
-          assistantResponse = "I can help you find IT products! What specifically are you looking for?\n\n• Product type (laptops, phones, tablets, monitors, accessories, etc.)\n• Specifications or features you need\n• Budget range\n• Quantity needed\n\nOnce you provide these details, I'll search our catalog and show you matching products with real-time pricing and vendor information!"
-        } else if (lowerMessage.includes('what can you') || lowerMessage.includes('help me') || lowerMessage.includes('what do you do')) {
-          assistantResponse = "I'm ProcureX, your AI procurement assistant! Here's what I can help you with:\n\n🔍 **Product Discovery**: Find IT products matching your requirements\n💰 **Pricing Information**: Get current prices from verified vendors\n📊 **Availability Checks**: Check stock levels in real-time\n🏢 **Vendor Connections**: Connect with verified suppliers\n📄 **Quotation Generation**: Create professional procurement quotes\n📋 **Product Comparison**: Compare specifications and prices\n✨ **Smart Recommendations**: Get AI-powered product suggestions\n\nJust tell me what you're looking for, and I'll help you find it quickly!"
-        } else {
-          if (lastFewMessages.some(m => m.includes('laptop') || m.includes('computer'))) {
-            assistantResponse = "I'd be happy to help you with laptop recommendations! Could you tell me more about:\n\n• Your budget range\n• Primary use case (work, gaming, school, etc.)\n• Any specific requirements?\n\nThis will help me find the perfect laptop for you!"
-          } else if (lastFewMessages.some(m => m.includes('phone') || m.includes('mobile'))) {
-            assistantResponse = "I can help you find the perfect phone! What specific features or budget are you looking for?"
-          } else {
-            assistantResponse = "I'm here to help with your IT procurement needs! I can assist you with finding products, checking prices, verifying vendors, and generating quotations.\n\nWhat would you like to do today? You can ask me about:\n\n• Specific IT products (laptops, phones, tablets, etc.)\n• Product availability and pricing\n• Vendor information\n• Creating quotations\n\nJust let me know what you need!"
-        }
-        }
-
-        addMessage({ role: 'assistant' as const, content: assistantResponse })
-
-        setIsLoading(false)
-        speakReplyFn.current(assistantResponse)
-        void persistAccountMessage(session, 'assistant', assistantResponse, nextTitle)
-        if (wsId) {
-          try {
-            await chatAPI.createMessage(wsId, assistantResponse, 'assistant')
-          } catch (error) {
-            console.error('Failed to save assistant message:', error)
-          }
-        }
+        await applyAssistant(cannedAssistantReply(userMessage, { guest: false }))
       }
     } catch (error: any) {
         console.error('Failed to send message:', error)
@@ -1556,6 +2068,7 @@ export default function ChatPage() {
           'Failed to send message. Please try again.'
         showToast(errorMessage, 'error')
       setIsLoading(false)
+      sendLockRef.current = false
     }
   }
 
@@ -1574,6 +2087,7 @@ export default function ChatPage() {
 
   // Handle logout
   const handleLogout = async () => {
+    wasAuthedRef.current = false
     await logout()
     setShowUserMenu(false)
     router.push('/login')
@@ -1591,16 +2105,19 @@ export default function ChatPage() {
       if (!inHeader && !inMobile) {
         setShowUserMenuHeader(false)
       }
+      if (chatMenuRef.current && !chatMenuRef.current.contains(event.target as Node)) {
+        setChatMenuId(null)
+      }
     }
 
-    if (showUserMenu || showUserMenuHeader) {
+    if (showUserMenu || showUserMenuHeader || chatMenuId != null) {
       document.addEventListener('mousedown', handleClickOutside)
     }
 
     return () => {
       document.removeEventListener('mousedown', handleClickOutside)
     }
-  }, [showUserMenu, showUserMenuHeader])
+  }, [showUserMenu, showUserMenuHeader, chatMenuId])
 
   useEffect(() => {
     if (!showSidebar) return
@@ -1621,19 +2138,20 @@ export default function ChatPage() {
     }
   }, [showSidebar])
 
-  // Guest chat limit — count localStorage only after mount to avoid hydration mismatch
-  const chatLimit = 5
-  const localSessionsCount = clientReady && !isAuthenticated
-    ? (() => {
-        try {
-          const local = localStorage.getItem('temp_chat_sessions')
-          return local ? JSON.parse(local).length : 0
-        } catch {
-          return 0
-        }
-      })()
-    : 0
-  const remainingChats = Math.max(0, chatLimit - localSessionsCount)
+  useEffect(() => {
+    if (!deleteTarget && chatMenuId == null) return
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return
+      if (deleteTarget && !deletingChat) setDeleteTarget(null)
+      else setChatMenuId(null)
+    }
+    document.addEventListener('keydown', onKey)
+    return () => document.removeEventListener('keydown', onKey)
+  }, [deleteTarget, chatMenuId, deletingChat])
+
+  // Guest limit is on starting new chats, not on sending in an open chat.
+  const guestChatsUsed = clientReady && !isAuthenticated ? countGuestChats(sessions) : 0
+  const remainingChats = Math.max(0, GUEST_CHAT_LIMIT - guestChatsUsed)
   const lastChatMessage = currentSession?.messages[currentSession.messages.length - 1]
   const waitingForReply =
     isLoading &&
@@ -1641,10 +2159,78 @@ export default function ChatPage() {
       lastChatMessage.role !== 'assistant' ||
       !lastChatMessage.content ||
       lastChatMessage.content === '...')
-  const hasReachedLimit = clientReady && !isAuthenticated && localSessionsCount >= chatLimit
+  const hasReachedLimit = clientReady && !isAuthenticated && guestChatsUsed >= GUEST_CHAT_LIMIT
+  const voiceStatus: VoiceOrbState = voice.voiceError
+    ? 'error'
+    : voice.speaking
+      ? 'speaking'
+      : waitingForReply
+        ? 'thinking'
+        : voice.cueName === 'listening' || voice.listening || voice.micMuted
+          ? 'listening'
+          : 'connecting'
+  const voiceCaption =
+    voice.transcript?.trim() ||
+    (voice.speaking || waitingForReply ? voice.spokenCaption : '') ||
+    undefined
 
   return (
-    <div className="fixed inset-0 h-dvh max-h-dvh bg-[#212121] overflow-hidden md:flex">
+    <>
+      <VoiceOverlay
+        open={voice.voiceMode}
+        status={voiceStatus}
+        muted={voice.micMuted}
+        error={voice.voiceError}
+        caption={voiceCaption}
+        cueName={voice.cueName}
+        onMute={() => voice.setMicMuted(!voice.micMuted)}
+        onEnd={voice.stopVoice}
+        onClose={voice.stopVoice}
+        onRetry={voice.retryListen}
+      />
+      {deleteTarget ? (
+        <div
+          className="fixed inset-0 z-[80] flex items-center justify-center bg-black/60 px-4"
+          onClick={() => {
+            if (!deletingChat) setDeleteTarget(null)
+          }}
+        >
+          <div
+            className="w-full max-w-sm rounded-2xl bg-[#2f2f2f] p-5 text-[#ececec] shadow-xl"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <h2 className="text-lg font-semibold">Delete chat?</h2>
+            <p className="mt-2 text-sm text-[#b4b4b4]">
+              This will delete{' '}
+              <span className="text-[#ececec]">{sessionLabel(deleteTarget)}</span>.
+            </p>
+            <div className="mt-5 flex justify-end gap-2">
+              <button
+                type="button"
+                disabled={deletingChat}
+                onClick={() => setDeleteTarget(null)}
+                className="rounded-lg px-3 py-2 text-sm text-[#ececec] hover:bg-[#3d3d3d] disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={deletingChat}
+                onClick={() => void deleteChat(deleteTarget)}
+                className="rounded-lg bg-red-600 px-3 py-2 text-sm text-white hover:bg-red-500 disabled:opacity-50"
+              >
+                {deletingChat ? 'Deleting...' : 'Delete'}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+    <div
+      className={`fixed inset-0 h-dvh max-h-dvh bg-[#212121] overflow-hidden md:flex ${
+        voice.voiceMode ? 'pointer-events-none' : ''
+      }`}
+      aria-hidden={voice.voiceMode || undefined}
+    >
       {showSidebar && (
         <button
           type="button"
@@ -1656,8 +2242,9 @@ export default function ChatPage() {
 
       {/* Sidebar - Navigation & Chat History (ChatGPT style) */}
       <div className={`flex flex-col h-full bg-black md:bg-[#171717] border-r border-[#2f2f2f] overflow-hidden z-50 w-72 max-w-[85vw] fixed inset-y-0 left-0 md:relative md:max-w-none md:w-64 md:flex-shrink-0 transition-transform duration-300 ${showSidebar ? 'translate-x-0' : '-translate-x-full max-md:pointer-events-none'} md:translate-x-0`}>
-        <div className="hidden md:flex items-center px-4 py-3 border-b border-[#2f2f2f]">
+        <div className="hidden md:flex items-center justify-between px-4 py-3 border-b border-[#2f2f2f]">
           <Logo className="h-6" />
+          {isSuper ? <SuperadminPagesMenu align="right" compact /> : null}
         </div>
         <div className="md:hidden flex items-center justify-between p-3 border-b border-[#2f2f2f]">
           <Logo className="h-6" />
@@ -1670,29 +2257,19 @@ export default function ChatPage() {
             <X className="w-5 h-5" />
           </button>
         </div>
-        {/* New Chat Button */}
-          <div className="p-3 border-b border-[#2f2f2f]">
+        <div className="p-2 space-y-1">
           <Button
             variant="ghost"
             size="sm"
             onClick={createNewSession}
             disabled={hasReachedLimit}
-            className="w-full justify-start bg-transparent hover:bg-[#2f2f2f] text-[#ececec] border border-[#2f2f2f] disabled:opacity-50"
+            className="w-full justify-start bg-transparent hover:bg-[#2f2f2f] text-[#ececec] disabled:opacity-50"
           >
             <Plus className="w-4 h-4 mr-2" />
             New chat
           </Button>
-          {hasReachedLimit && (
-            <p className="text-xs text-[#8e8e8e] mt-2 px-2">
-              Chat limit reached. <Link href="/login" className="text-primary-600 hover:underline">Login</Link> for unlimited chats.
-            </p>
-          )}
-        </div>
-
-        {/* Utility Links */}
-        <div className="p-2 border-b border-[#2f2f2f] space-y-1">
-          <p className="text-xs text-[#b4b4b4] px-3 py-2 uppercase tracking-wider">Menu</p>
           <button 
+            type="button"
             onClick={() => {
               setSearchQuery('')
               setShowSidebar(false)
@@ -1703,146 +2280,36 @@ export default function ChatPage() {
             <Search className="w-4 h-4 text-[#b4b4b4]" />
             <span className="text-sm">Search chats</span>
           </button>
-          <button
-            type="button"
-            onClick={() => {
-              setSearchQuery('')
-              setShowSidebar(false)
-              setShowSearchModal(true)
-            }}
-            className="w-full flex items-center space-x-2 px-3 py-2.5 rounded-lg hover:bg-[#2f2f2f] transition-colors text-[#ececec]"
-          >
-            <BookOpen className="w-4 h-4 text-[#b4b4b4]" />
-            <span className="text-sm">Library</span>
-          </button>
-          <Link
-            href="/quotations"
-            onClick={() => setShowSidebar(false)}
-            className="w-full flex items-center space-x-2 px-3 py-2.5 rounded-lg hover:bg-[#2f2f2f] transition-colors text-[#ececec]"
-          >
-            <Folder className="w-4 h-4 text-[#b4b4b4]" />
-            <span className="text-sm">Projects</span>
-          </Link>
-        </div>
-
-        {/* Navigation Links */}
-        <div className="p-2 border-b border-[#2f2f2f] space-y-1">
-          <p className="text-xs text-[#b4b4b4] px-3 py-2 uppercase tracking-wider">Workspace</p>
-          <Link
-            href="https://www.bison.ng"
-            target="_blank"
-            rel="noopener noreferrer"
-            onClick={() => setShowSidebar(false)}
-            className="flex items-center space-x-2 px-3 py-2.5 rounded-lg hover:bg-[#2f2f2f] transition-colors text-[#ececec]"
-          >
-            <Image src="/images/bisonbooks.svg" alt="BisonBooks" width={20} height={20} />
-            <span className="text-sm">BisonBooks</span>
-          </Link>
-          <Link
-            href="/products"
-            onClick={() => setShowSidebar(false)}
-            className="flex items-center space-x-2 px-3 py-2.5 rounded-lg hover:bg-[#2f2f2f] transition-colors text-[#ececec]"
-          >
-            <ShoppingCart className="w-4 h-4 text-[#b4b4b4]" />
-            <span className="text-sm">Browse Products</span>
-          </Link>
-          <Link
-            href="/quotations"
-            onClick={() => setShowSidebar(false)}
-            className="flex items-center space-x-2 px-3 py-2.5 rounded-lg hover:bg-[#2f2f2f] transition-colors text-[#ececec]"
-          >
-            <FileText className="w-4 h-4 text-[#b4b4b4]" />
-            <span className="text-sm">Quotations</span>
-          </Link>
-          {user?.role === 'vendor' && (
-            <Link
-              href="/vendor"
-              onClick={() => setShowSidebar(false)}
-              className="flex items-center space-x-2 px-3 py-2.5 rounded-lg hover:bg-[#2f2f2f] transition-colors text-[#ececec]"
-            >
-              <Building2 className="w-4 h-4 text-[#b4b4b4]" />
-              <span className="text-sm">Vendor</span>
-            </Link>
+          {hasReachedLimit && (
+            <p className="text-xs text-[#8e8e8e] px-3 pb-1">
+              You can keep chatting here.{' '}
+              <Link href="/login" className="text-primary-600 hover:underline">Login</Link> to start more chats.
+            </p>
           )}
         </div>
 
-        {/* Recent Chats */}
         <div className="flex-1 overflow-y-auto pb-24">
           <div className="p-2">
-            <div className="px-3 mb-2">
-              <div className="relative">
-                <Search className="absolute left-2 top-1/2 transform -translate-y-1/2 w-4 h-4 text-[#8e8e8e]" />
-                <input
-                  type="text"
-                  placeholder="Search chats..."
-                  value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
-                  className="w-full pl-8 pr-3 py-1.5 text-xs bg-[#2f2f2f] border border-[#2f2f2f] rounded-lg text-[#ececec] placeholder-[#8e8e8e] focus:outline-none focus:ring-2 focus:ring-gray-600"
-                />
-                {searchQuery && (
-                  <button
-                    onClick={() => setSearchQuery('')}
-                    className="absolute right-2 top-1/2 transform -translate-y-1/2 text-[#8e8e8e] hover:text-[#ececec]"
-                  >
-                    ×
-                  </button>
-                )}
+            <p className="text-xs text-[#8e8e8e] px-3 py-2">Chats</p>
+            {isAuthenticated ? (
+              <div className="px-3 pb-3">
+                <BusinessSwitcher compact />
               </div>
-            </div>
-            <p className="text-xs text-[#b4b4b4] px-3 py-2 uppercase tracking-wider">Recent Chats</p>
-            {isAuthenticated && accountSyncReady === false && (
-              <button
-                type="button"
-                onClick={async () => {
-                  try {
-                    const sql = await fetch('/chat-sync.sql').then((res) => res.text())
-                    await navigator.clipboard.writeText(sql)
-                    showToast('SQL copied. Paste it in Supabase SQL editor, click Run, then refresh.', 'success')
-                  } catch {
-                    showToast('Could not copy the setup SQL.', 'error')
-                  }
-                }}
-                className="mx-3 mb-2 text-left text-[11px] leading-snug text-[#8e8e8e] hover:text-[#ececec]"
-              >
-                Copy setup SQL so this account’s chats match on phone and laptop.
-              </button>
-            )}
+            ) : null}
             {(() => {
-              const filteredSessions = searchQuery
-                ? sessions.filter((session) =>
-                    sessionLabel(session).toLowerCase().includes(searchQuery.toLowerCase())
-                  )
-                : sessions
+              const filteredSessions = sessions.filter(
+                (session) => !isBlankChat(session) || sameChatId(session.id, currentSession?.id)
+              )
 
               if ((!authReady || sessionsLoading) && sessions.length === 0) {
                 return <p className="text-xs text-[#8e8e8e] px-3 py-2">Loading chats...</p>
               }
 
               if (filteredSessions.length === 0) {
-                return (
-                  <p className="text-xs text-[#8e8e8e] px-3 py-2">
-                    {searchQuery ? 'No chats found' : 'No recent chats'}
-                  </p>
-                )
+                return <p className="text-xs text-[#8e8e8e] px-3 py-2">No chats yet</p>
               }
 
-              return filteredSessions.map((session) => (
-                <button
-                  key={session.id}
-                  onClick={() => {
-                    selectSession(session.id)
-                    setSearchQuery('')
-                  }}
-                  className={`w-full text-left px-3 py-2.5 rounded-lg hover:bg-[#2f2f2f] transition-colors mb-1 group ${
-                    currentSession?.id === session.id || sameChatId(currentSession?.id, session.id) ? 'bg-[#2f2f2f]' : ''
-                  }`}
-                >
-                  <p className="text-sm text-[#ececec] truncate flex items-center">
-                    <MessageSquare className="w-4 h-4 mr-2 text-[#b4b4b4] flex-shrink-0" />
-                    {sessionLabel(session)}
-                  </p>
-                </button>
-              ))
+              return filteredSessions.map((session) => renderChatRow(session))
             })()}
           </div>
         </div>
@@ -1855,15 +2322,58 @@ export default function ChatPage() {
                 onClick={() => setShowUserMenu(!showUserMenu)}
                 className="w-full flex items-center justify-between p-2 rounded-lg hover:bg-[#2f2f2f] transition-colors text-left"
               >
-                <div className="text-xs text-[#b4b4b4] flex-1">
-                  <p className="text-[#ececec] font-medium mb-1">{user?.full_name || user?.email}</p>
-                  <p>Unlimited chats</p>
+                <div className="text-xs text-[#b4b4b4] flex-1 min-w-0">
+                  <p className="text-[#ececec] font-medium truncate">{user?.full_name || user?.email}</p>
                 </div>
                 <ChevronUp className={`w-4 h-4 text-[#b4b4b4] transition-transform ${showUserMenu ? '' : 'rotate-180'}`} />
               </button>
               
               {showUserMenu && (
                 <div className="absolute bottom-full left-0 right-0 mb-2 bg-[#2f2f2f] border border-[#2f2f2f] rounded-lg shadow-lg overflow-hidden z-50">
+                  <Link
+                    href="/quotations"
+                    onClick={() => setShowUserMenu(false)}
+                    className="flex items-center space-x-2 px-4 py-3 text-sm text-[#ececec] hover:bg-[#3d3d3d] transition-colors"
+                  >
+                    <FileText className="w-4 h-4" />
+                    <span>Quotations</span>
+                  </Link>
+                  <Link
+                    href="/businesses"
+                    onClick={() => setShowUserMenu(false)}
+                    className="flex items-center space-x-2 px-4 py-3 text-sm text-[#ececec] hover:bg-[#3d3d3d] transition-colors"
+                  >
+                    <Building2 className="w-4 h-4" />
+                    <span>Businesses</span>
+                  </Link>
+                  {isVendor && (
+                    <Link
+                      href="/vendor"
+                      onClick={() => {
+                        setAccountView('vendor')
+                        setShowUserMenu(false)
+                      }}
+                      className="flex items-center space-x-2 px-4 py-3 text-sm text-[#ececec] hover:bg-[#3d3d3d] transition-colors"
+                    >
+                      <Building2 className="w-4 h-4" />
+                      <span>Vendor dashboard</span>
+                    </Link>
+                  )}
+                  <Link
+                    href="/upgrade"
+                    onClick={() => setShowUserMenu(false)}
+                    className="flex items-center space-x-2 px-4 py-3 text-sm text-[#ececec] hover:bg-[#3d3d3d] transition-colors"
+                  >
+                    <span>Upgrade to Pro</span>
+                  </Link>
+                  <Link
+                    href="/profile#voice"
+                    onClick={() => setShowUserMenu(false)}
+                    className="flex items-center space-x-2 px-4 py-3 text-sm text-[#ececec] hover:bg-[#3d3d3d] transition-colors"
+                  >
+                    <Settings className="w-4 h-4" />
+                    <span>Voice settings</span>
+                  </Link>
                   <Link
                     href="/profile"
                     onClick={() => setShowUserMenu(false)}
@@ -1886,13 +2396,20 @@ export default function ChatPage() {
             <div className="flex flex-col w-full space-y-2">
               {clientReady && (
                 <p className="text-xs text-[#b4b4b4]">
-                  {remainingChats > 0 ? (
-                    <span>{remainingChats} chat{remainingChats !== 1 ? 's' : ''} remaining</span>
-                  ) : (
-                    <span className="text-amber-400">Chat limit reached</span>
-                  )}
-                </p>
+                {remainingChats > 0 ? (
+                    <span>{remainingChats} new chat{remainingChats !== 1 ? 's' : ''} remaining</span>
+                ) : (
+                    <span className="text-amber-400">Login to start more chats</span>
+                )}
+              </p>
               )}
+              <Link
+                href="/profile#voice"
+                className="text-xs text-[#8e8e8e] hover:text-[#ececec] inline-flex items-center gap-1"
+              >
+                <Settings className="w-3.5 h-3.5" />
+                Voice settings
+              </Link>
               <div className="flex space-x-2">
                 <Link href="/login" className="flex-1">
                   <Button
@@ -1957,7 +2474,9 @@ export default function ChatPage() {
                   ? sessions.filter((session) =>
                       sessionLabel(session).toLowerCase().includes(searchQuery.toLowerCase())
                     )
-                  : sessions
+                  : sessions.filter(
+                      (session) => !isBlankChat(session) || sameChatId(session.id, currentSession?.id)
+                    )
                 if ((!authReady || sessionsLoading) && sessions.length === 0) {
                   return <p className="text-sm text-[#8e8e8e] px-3 py-4 text-center">Loading chats...</p>
                 }
@@ -1968,22 +2487,7 @@ export default function ChatPage() {
                     </p>
                   )
                 }
-                return matches.map((session) => (
-                  <button
-                    key={session.id}
-                    onClick={() => {
-                      selectSession(session.id)
-                      setShowSearchModal(false)
-                      setSearchQuery('')
-                    }}
-                    className="w-full text-left px-3 py-2.5 rounded-lg hover:bg-[#3d3d3d] transition-colors mb-1 text-[#ececec]"
-                  >
-                    <p className="text-sm flex items-center">
-                      <MessageSquare className="w-4 h-4 mr-2 text-[#b4b4b4] flex-shrink-0" />
-                      <span className="truncate">{sessionLabel(session)}</span>
-                    </p>
-                  </button>
-                ))
+                return matches.map((session) => renderChatRow(session, true))
               })()}
             </div>
             <div className="p-4 border-t border-[#2f2f2f]">
@@ -2005,7 +2509,7 @@ export default function ChatPage() {
       <div className="flex-1 flex flex-col bg-black md:bg-[#212121] min-w-0 min-h-0 h-full w-full">
         {/* Mobile header */}
         <div className="md:hidden relative flex items-center justify-between px-3 py-2 shrink-0">
-          <button
+                      <button
             type="button"
             onClick={() => setShowSidebar(true)}
             className="h-10 w-10 inline-flex items-center justify-center rounded-full bg-[#2a2a2a] text-white"
@@ -2017,10 +2521,12 @@ export default function ChatPage() {
             {currentSession ? sessionLabel(currentSession) : 'New chat'}
           </h1>
           <div className="flex items-center gap-2">
+            {isSuper ? <SuperadminPagesMenu align="right" compact /> : null}
             <button
               type="button"
               onClick={() => void createNewSession()}
-              className="h-10 w-10 inline-flex items-center justify-center rounded-full bg-[#2a2a2a] text-white"
+              disabled={hasReachedLimit}
+              className="h-10 w-10 inline-flex items-center justify-center rounded-full bg-[#2a2a2a] text-white disabled:opacity-40"
               aria-label="New chat"
             >
               <Pencil className="w-5 h-5" />
@@ -2036,7 +2542,7 @@ export default function ChatPage() {
                 aria-label="More"
               >
                 <MoreHorizontal className="w-5 h-5" />
-              </button>
+                      </button>
               {isAuthenticated && showUserMenuHeader && (
                 <div className="absolute right-0 top-full mt-2 w-48 bg-[#2f2f2f] border border-[#2f2f2f] rounded-2xl shadow-lg overflow-hidden z-50">
                   <div className="px-4 py-3 border-b border-[#3d3d3d]">
@@ -2044,75 +2550,80 @@ export default function ChatPage() {
                     <p className="text-xs text-[#b4b4b4] mt-1 truncate">{user?.email}</p>
                   </div>
                   <Link
-                    href="/profile"
+                    href="/quotations"
                     onClick={() => setShowUserMenuHeader(false)}
                     className="flex items-center space-x-2 px-4 py-3 text-sm text-[#ececec] hover:bg-[#3d3d3d]"
                   >
-                    <User className="w-4 h-4" />
-                    <span>Profile</span>
+                    <FileText className="w-4 h-4" />
+                    <span>Quotations</span>
                   </Link>
-                  <button
-                    onClick={() => {
-                      handleLogout()
-                      setShowUserMenuHeader(false)
-                    }}
-                    className="w-full flex items-center space-x-2 px-4 py-3 text-sm text-red-400 hover:bg-[#3d3d3d] text-left"
+                  <Link
+                    href="/businesses"
+                    onClick={() => setShowUserMenuHeader(false)}
+                    className="flex items-center space-x-2 px-4 py-3 text-sm text-[#ececec] hover:bg-[#3d3d3d]"
                   >
-                    <LogOut className="w-4 h-4" />
-                    <span>Logout</span>
-                  </button>
-                </div>
-              )}
-            </div>
-          </div>
-        </div>
-
-        {/* Desktop header */}
-        <div className="hidden md:flex bg-[#171717] border-b border-[#2f2f2f] px-4 py-3 items-center justify-between gap-2 shrink-0">
-          <div className="flex items-center min-w-0 text-[#ececec]">
-            <h1 className="font-semibold truncate text-base">
-              {currentSession ? sessionLabel(currentSession) : 'New chat'}
-            </h1>
-          </div>
-          <div className="flex items-center space-x-3">
-            <Link
-              href="/upgrade"
-              className="inline-flex items-center text-xs uppercase tracking-wide border border-primary-500 text-primary-600 px-3 py-1.5 rounded-full hover:bg-primary-600/10 transition"
-            >
-              Upgrade to Pro
-            </Link>
-            <button className="min-h-11 min-w-11 inline-flex items-center justify-center rounded-full text-[#b4b4b4] hover:bg-[#2f2f2f]">
-              <Bell className="w-4 h-4" />
-            </button>
-            {isAuthenticated ? (
-              <div className="relative" ref={userMenuHeaderRef}>
-                <button
-                  onClick={() => setShowUserMenuHeader(!showUserMenuHeader)}
-                  className="min-h-11 min-w-11 inline-flex items-center justify-center rounded-full text-[#b4b4b4] hover:bg-[#2f2f2f] relative"
+                    <Building2 className="w-4 h-4" />
+                    <span>Businesses</span>
+                  </Link>
+                  {isVendor && (
+                    <Link
+                      href="/vendor"
+                      onClick={() => {
+                        setAccountView('vendor')
+                        setShowUserMenuHeader(false)
+                      }}
+                      className="flex items-center space-x-2 px-4 py-3 text-sm text-[#ececec] hover:bg-[#3d3d3d]"
+                    >
+                      <Building2 className="w-4 h-4" />
+                      <span>Vendor dashboard</span>
+                    </Link>
+                  )}
+                  <Link
+                    href="/profile#voice"
+                    onClick={() => setShowUserMenuHeader(false)}
+                    className="flex items-center space-x-2 px-4 py-3 text-sm text-[#ececec] hover:bg-[#3d3d3d]"
                 >
                   <Settings className="w-4 h-4" />
-                </button>
-                
-                {showUserMenuHeader && (
-                  <div className="absolute right-0 top-full mt-2 w-48 bg-[#2f2f2f] border border-[#2f2f2f] rounded-lg shadow-lg overflow-hidden z-50">
-                    <div className="px-4 py-3 border-b border-[#2f2f2f]">
-                      <p className="text-sm font-medium text-[#ececec]">{user?.full_name || user?.email}</p>
-                      <p className="text-xs text-[#b4b4b4] mt-1">{user?.email}</p>
-                    </div>
+                    <span>Voice settings</span>
+                  </Link>
                     <Link
                       href="/profile"
                       onClick={() => setShowUserMenuHeader(false)}
-                      className="flex items-center space-x-2 px-4 py-3 text-sm text-[#ececec] hover:bg-[#3d3d3d] transition-colors"
+                    className="flex items-center space-x-2 px-4 py-3 text-sm text-[#ececec] hover:bg-[#3d3d3d]"
                     >
                       <User className="w-4 h-4" />
                       <span>Profile</span>
                     </Link>
+                  {currentSession ? (
+                    <button
+                      onClick={() => {
+                        openRenameChat(currentSession)
+                        setShowUserMenuHeader(false)
+                      }}
+                      className="w-full flex items-center space-x-2 px-4 py-3 text-sm text-[#ececec] hover:bg-[#3d3d3d] text-left"
+                    >
+                      <Pencil className="w-4 h-4" />
+                      <span>Rename chat</span>
+                    </button>
+                  ) : null}
+                  {currentSession ? (
+                    <button
+                      onClick={() => {
+                        openDeleteChat(currentSession)
+                        setShowUserMenuHeader(false)
+                      }}
+                      className="w-full flex items-center space-x-2 px-4 py-3 text-sm text-red-400 hover:bg-[#3d3d3d] text-left"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                      <span>Delete chat</span>
+                    </button>
+                  ) : null}
                     <button
                       onClick={() => {
                         handleLogout()
                         setShowUserMenuHeader(false)
                       }}
-                      className="w-full flex items-center space-x-2 px-4 py-3 text-sm text-red-400 hover:bg-[#3d3d3d] transition-colors text-left"
+                    className="w-full flex items-center space-x-2 px-4 py-3 text-sm text-red-400 hover:bg-[#3d3d3d] text-left"
                     >
                       <LogOut className="w-4 h-4" />
                       <span>Logout</span>
@@ -2120,61 +2631,104 @@ export default function ChatPage() {
                   </div>
                 )}
               </div>
-            ) : (
-              <Link href="/login">
-                <button className="min-h-11 min-w-11 inline-flex items-center justify-center rounded-full text-[#b4b4b4] hover:bg-[#2f2f2f]">
-                  <Settings className="w-4 h-4" />
-                </button>
-              </Link>
-            )}
           </div>
         </div>
 
-        {voice.voiceMode && (
-          <div className="md:hidden flex-1 flex items-center justify-center min-h-0">
-            <div className={`gpt-orb ${voice.listening || voice.speaking ? 'gpt-orb-listening' : ''}`} />
-          </div>
-        )}
+        {/* Desktop header */}
+        <div className="hidden md:flex px-4 py-3 items-center shrink-0">
+          {currentSession ? (
+            <button
+              type="button"
+              onClick={() => openRenameChat(currentSession)}
+              className="font-semibold truncate text-base text-[#ececec] hover:text-white"
+              title="Rename chat"
+            >
+              {sessionLabel(currentSession)}
+            </button>
+          ) : (
+            <h1 className="font-semibold truncate text-base text-[#ececec]">New chat</h1>
+          )}
+        </div>
 
         {/* Messages - ChatGPT Style */}
-        <div className={`${voice.voiceMode ? 'hidden md:flex' : 'flex'} flex-1 overflow-y-auto overscroll-contain min-h-0 flex-col`}>
-          {currentSession?.messages.length === 0 && (
+        <div className="flex flex-1 overflow-y-auto overscroll-contain min-h-0 flex-col">
+          {currentSession?.messages.length === 0 && !voice.transcript && (
             <div className="flex items-center justify-center min-h-full py-8">
               <div className="text-center max-w-2xl px-4">
                 <div className="mb-3 md:mb-4">
                   <h1 className="md:hidden text-[28px] font-medium text-white">What&apos;s on the agenda today?</h1>
                   <Logo className="hidden md:inline-block h-12" />
-                </div>
-                <p className="hidden md:block text-[#b4b4b4] text-lg mb-8">Ask me about IT products, prices, and availability!</p>
+                        </div>
+                <p className="hidden md:block text-[#b4b4b4] text-lg mb-8">Ask me about hardware, software, or a service to get built.</p>
                 <div className="hidden md:grid grid-cols-1 sm:grid-cols-2 gap-3">
-                  {[
-                    "What laptops do you have?",
-                    "Show me available phones",
+                      {[
+                        "What laptops do you have?",
+                    "I need software to manage inventory",
                     budgetHint,
-                    "What's in stock?"
-                  ].map((suggestion) => (
-                    <button
-                      key={suggestion}
+                    "Who can build a company website?"
+                      ].map((suggestion) => (
+                        <button
+                          key={suggestion}
                       onClick={() => void handleSend(suggestion)}
                       className="p-3 min-h-11 bg-[#2f2f2f] hover:bg-[#3d3d3d] rounded-lg text-[#ececec] text-left text-sm transition-colors"
-                    >
-                      {suggestion}
-                    </button>
-                  ))}
-                </div>
+                        >
+                          {suggestion}
+                        </button>
+                      ))}
+                    </div>
               </div>
             </div>
           )}
           
           <div className="max-w-3xl mx-auto w-full">
-            {currentSession?.messages.map((message, index) => (
-              <ChatMessage key={index} message={message} onSpeak={voice.speakNow} />
-            ))}
+            {currentSession?.messages.map((message, index, all) => {
+              const isLatestAssistant =
+                message.role === 'assistant' &&
+                !all.slice(index + 1).some((item: any) => item.role === 'assistant')
+              return (
+              <div
+                key={index}
+                ref={isLatestAssistant ? latestReplyRef : undefined}
+                className={isLatestAssistant ? 'scroll-mt-3' : undefined}
+              >
+              <ChatMessage
+                message={message}
+                onSpeak={voice.speakNow}
+                showActions={isLatestAssistant}
+                onFollowUp={
+                  message.role === 'assistant' && index === all.length - 1
+                    ? (text) => void handleSend(text)
+                    : undefined
+                }
+                followUpDisabled={false}
+              />
+              </div>
+              )
+            })}
+
+            {voice.transcript && (
+              <div>
+                <div className="max-w-3xl mx-auto px-4 py-2.5 md:py-5 flex justify-end md:block">
+                  <div className="flex items-start md:space-x-4 max-w-[88%] md:max-w-none">
+                    <div className="flex-shrink-0 hidden md:block">
+                      <div className="w-8 h-8 rounded-full bg-[#3d3d3d] flex items-center justify-center">
+                        <User className="w-5 h-5 text-white" />
+                  </div>
+                    </div>
+                    <div className="flex-1 min-w-0 overflow-hidden">
+                      <div className="text-[#ececec] text-[15px] md:text-base break-words bg-[#2f2f2f] md:bg-transparent rounded-[22px] md:rounded-none px-4 py-2.5 md:px-0 md:py-0 live-caption-caret">
+                        {voice.transcript}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
             
             {waitingForReply && (
               <div className="px-4 py-6 md:py-8 bg-transparent">
                 <div className="flex items-center max-w-3xl mx-auto">
-                  <ProcureXLoader size={48} label="Waiting for ProcureX" />
+                  <ProcureXLoader size={80} label="Waiting for ProcureX" />
                 </div>
               </div>
             )}
@@ -2182,12 +2736,70 @@ export default function ChatPage() {
             {productResults.length > 0 && (currentSession?.messages?.length ?? 0) > 0 && (
               <div className="px-4 py-6 bg-transparent">
                 <div className="max-w-3xl mx-auto">
-                  <h3 className="text-sm font-semibold text-[#ececec] mb-4">Available Products:</h3>
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                    {productResults.map((product) => (
-                      <ProductCard key={product.id} product={product} />
-                    ))}
-                  </div>
+                  {(() => {
+                    const exact = productResults.filter((product) => product.match_kind === 'exact' || product.match_kind === 'close')
+                    const suggestions = productResults.filter((product) => product.match_kind === 'related')
+                    const rest = exact.length ? [] : productResults.filter((product) => product.match_kind !== 'related')
+                    return (
+                      <>
+                        {exact.length > 0 ? (
+                          <>
+                            <h3 className="text-sm font-semibold text-[#ececec] mb-4">Exact matches</h3>
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-6">
+                              {exact.map((product) => (
+                                <ProductCard
+                                  key={product.id}
+                                  product={product}
+                                  onSelect={
+                                    waitingForReply
+                                      ? undefined
+                                      : (item) => void handleSend(`Generate a formal procurement quote for ${item.name}`)
+                                  }
+                                />
+                              ))}
+                            </div>
+                          </>
+                        ) : rest.length > 0 ? (
+                          <>
+                            <h3 className="text-sm font-semibold text-[#ececec] mb-4">Matching products</h3>
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-6">
+                              {rest.map((product) => (
+                                <ProductCard
+                                  key={product.id}
+                                  product={product}
+                                  onSelect={
+                                    waitingForReply
+                                      ? undefined
+                                      : (item) => void handleSend(`Generate a formal procurement quote for ${item.name}`)
+                                  }
+                                />
+                              ))}
+                            </div>
+                          </>
+                        ) : null}
+                        {suggestions.length > 0 && (
+                          <>
+                            <h3 className="text-sm font-semibold text-[#ececec] mb-4">
+                              {exact.length ? 'Related suggestions' : 'Closest suggestions'}
+                            </h3>
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                              {suggestions.map((product) => (
+                                <ProductCard
+                                  key={product.id}
+                                  product={product}
+                                  onSelect={
+                                    waitingForReply
+                                      ? undefined
+                                      : (item) => void handleSend(`Generate a formal procurement quote for ${item.name}`)
+                                  }
+                                />
+                              ))}
+                            </div>
+                          </>
+                        )}
+                      </>
+                    )
+                  })()}
                 </div>
               </div>
             )}
@@ -2201,14 +2813,6 @@ export default function ChatPage() {
           {showComposerMenu && (
             <div className="md:hidden absolute bottom-full left-3 right-3 mb-2 bg-[#2f2f2f] rounded-2xl overflow-hidden shadow-xl z-20">
               <Link
-                href="/products"
-                onClick={() => setShowComposerMenu(false)}
-                className="flex items-center gap-3 px-4 py-3.5 text-sm text-white hover:bg-[#3d3d3d]"
-              >
-                <ShoppingCart className="w-4 h-4" />
-                Browse products
-              </Link>
-              <Link
                 href="/quotations"
                 onClick={() => setShowComposerMenu(false)}
                 className="flex items-center gap-3 px-4 py-3.5 text-sm text-white hover:bg-[#3d3d3d]"
@@ -2219,43 +2823,7 @@ export default function ChatPage() {
             </div>
           )}
 
-          {voice.voiceMode && (
-            <div className="md:hidden flex items-center gap-2.5">
-              <div className="flex-1 min-h-12 rounded-full bg-[#303030] flex items-center px-4">
-                <Plus className="w-5 h-5 text-white mr-3 flex-shrink-0" />
-                <span className={`min-w-0 flex-1 text-sm leading-snug line-clamp-2 ${
-                  voice.transcript || voice.listening ? 'text-[#ececec]' : 'text-[#8e8e8e]'
-                }`}>
-                  {voice.speaking
-                    ? 'ProcureX is speaking...'
-                    : voice.transcript
-                      ? voice.transcript
-                      : voice.listening
-                        ? 'Listening...'
-                        : 'Ask ProcureX'}
-                </span>
-              </div>
-              <button
-                type="button"
-                onClick={voice.toggleListening}
-                disabled={isLoading}
-                className="h-12 w-12 rounded-full bg-[#303030] text-white inline-flex items-center justify-center"
-                aria-label={voice.listening ? 'Stop listening' : 'Muted'}
-              >
-                {voice.listening ? <Mic className="w-5 h-5" /> : <MicOff className="w-5 h-5" />}
-              </button>
-              <button
-                type="button"
-                onClick={voice.stopVoice}
-                className="h-12 w-12 rounded-full bg-white text-black inline-flex items-center justify-center"
-                aria-label="Close voice"
-              >
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-          )}
-
-          <div className={`${voice.voiceMode ? 'hidden md:block' : 'block'} max-w-3xl mx-auto`}>
+          <div className="max-w-3xl mx-auto">
             <div className="flex items-end gap-2">
             <div className={`relative flex-1 min-w-0 flex items-end md:items-end bg-[#303030] md:bg-[#2f2f2f] rounded-full md:rounded-2xl border ${
               voice.listening ? 'border-[#19C37D]' : 'border-transparent'
@@ -2273,12 +2841,13 @@ export default function ChatPage() {
                   type="button"
                   onClick={voice.toggleVoiceMode}
                   disabled={isLoading}
-                  title={voice.voiceMode ? 'Stop voice chat' : 'Start voice chat'}
+                  title={voice.voiceMode ? 'Close voice chat' : 'Chat with voice'}
                   className={`hidden md:inline-flex m-2 min-h-11 min-w-11 items-center justify-center rounded-lg flex-shrink-0 transition-colors ${
                     voice.voiceMode
                       ? 'bg-[#19C37D] text-white'
                       : 'text-[#8e8e8e] hover:bg-[#3d3d3d] hover:text-[#ececec]'
                   }`}
+                  aria-label="Chat with voice"
                 >
                   <AudioLines className="w-5 h-5" />
                 </button>
@@ -2290,18 +2859,17 @@ export default function ChatPage() {
                 enterKeyHint="send"
                 placeholder={
                   voice.listening
-                    ? 'Listening... speak now'
+                    ? 'Listening...'
                     : voice.speaking
                       ? 'Speaking...'
                       : 'Ask ProcureX'
                 }
                 className="flex-1 min-w-0 resize-none bg-transparent text-base text-[#ececec] placeholder-[#8e8e8e] px-1 md:px-2 py-3 focus:outline-none overflow-y-auto"
                 rows={1}
-                disabled={isLoading}
                 style={{ maxHeight: '120px' }}
               />
               {voice.supported && (
-                <button
+              <button
                   type="button"
                   onClick={voice.toggleListening}
                   disabled={isLoading || voice.speaking}
@@ -2320,16 +2888,15 @@ export default function ChatPage() {
                   type="button"
                   onPointerDown={(e) => e.preventDefault()}
                   onClick={() => void handleSend()}
-                  disabled={isLoading}
                   className="hidden md:inline-flex m-2 min-h-11 min-w-11 items-center justify-center rounded-lg bg-primary-600 text-white hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex-shrink-0"
                   aria-label="Send"
                 >
                   {waitingForReply ? (
                     <ProcureXLoader size={24} label="Waiting for ProcureX" />
-                  ) : (
-                    <Send className="w-5 h-5 text-white" />
-                  )}
-                </button>
+                ) : (
+                  <Send className="w-5 h-5 text-white" />
+                )}
+              </button>
               ) : (
                 <>
                   <button
@@ -2337,7 +2904,7 @@ export default function ChatPage() {
                     onClick={voice.toggleVoiceMode}
                     disabled={isLoading || !voice.supported}
                     className="md:hidden m-1 h-9 w-9 inline-flex items-center justify-center rounded-full bg-[#3b82f6] text-white disabled:opacity-50 flex-shrink-0"
-                    aria-label="Voice mode"
+                    aria-label="Chat with voice"
                   >
                     {waitingForReply ? <ProcureXLoader size={24} label="Waiting for ProcureX" /> : <AudioLines className="w-5 h-5" />}
                   </button>
@@ -2362,7 +2929,6 @@ export default function ChatPage() {
                   }
                 }}
                 onClick={() => void handleSend()}
-                disabled={isLoading}
                 className="md:hidden h-12 w-12 rounded-full bg-white text-black inline-flex items-center justify-center flex-shrink-0 disabled:opacity-50"
                 aria-label="Send"
               >
@@ -2371,16 +2937,13 @@ export default function ChatPage() {
             ) : null}
             </div>
             <p className="hidden md:block text-xs text-[#8e8e8e] text-center mt-2 px-2">
-              {voice.voiceMode
-                ? 'Voice chat on. Speak, then ProcureX will talk back.'
-                : voice.supported
-                  ? 'Tap the mic to talk, or the waveform for hands-free voice chat. ProcureX will speak the reply.'
-                  : 'AI can make mistakes. Check important info.'}
+              ProcureX can make mistakes. Check important info.
             </p>
           </div>
         </div>
       </div>
     </div>
+    </>
   )
 }
 

@@ -1,6 +1,8 @@
 'use client'
 
 const STORAGE_COUNTRY = 'procurex_country'
+const STORAGE_CURRENCY = 'procurex_currency'
+const STORAGE_REGION_CONFIRMED = 'procurex_region_confirmed'
 const STORAGE_RATES = 'procurex_fx_usd'
 const RATES_TTL_MS = 6 * 60 * 60 * 1000
 
@@ -127,8 +129,70 @@ let countryCache: string | null = null
 let ratesCache: Record<string, number> | null = null
 let locationPromise: Promise<string> | null = null
 
+function storedCurrency() {
+  if (typeof window === 'undefined') return null
+  const code = window.localStorage.getItem(STORAGE_CURRENCY)
+  return code && /^[A-Z]{3}$/.test(code) ? code : null
+}
+
+/** The buyer's chosen currency wins over the currency of their country. */
 function currencyForCountry(country: string) {
+  return storedCurrency() || COUNTRY_CURRENCY[country] || 'USD'
+}
+
+export function defaultCurrencyForCountry(country: string) {
   return COUNTRY_CURRENCY[country] || 'USD'
+}
+
+function displayNames(type: 'region' | 'currency') {
+  try {
+    const DisplayNames = (Intl as any).DisplayNames
+    return DisplayNames ? new DisplayNames(['en'], { type }) : null
+  } catch {
+    return null
+  }
+}
+
+export function countryName(code: string) {
+  return displayNames('region')?.of(code) || code
+}
+
+export function currencyName(code: string) {
+  return displayNames('currency')?.of(code) || code
+}
+
+export function listCountries(): { code: string; name: string }[] {
+  return Object.keys(COUNTRY_CURRENCY)
+    .map((code) => ({ code, name: countryName(code) }))
+    .sort((a, b) => a.name.localeCompare(b.name))
+}
+
+export function listCurrencies(): { code: string; name: string }[] {
+  const codes = Array.from(new Set([...Object.values(COUNTRY_CURRENCY), ...Object.keys(FALLBACK_USD_RATES)]))
+  return codes.map((code) => ({ code, name: currencyName(code) })).sort((a, b) => a.code.localeCompare(b.code))
+}
+
+export type RegionPreference = { country: string; currency: string; confirmed: boolean }
+
+export function getRegionPreference(): RegionPreference {
+  const country =
+    countryCache ||
+    (typeof window !== 'undefined' ? window.localStorage.getItem(STORAGE_COUNTRY) : null) ||
+    countryFromTimezone() ||
+    countryFromLocale() ||
+    'NG'
+  const confirmed = typeof window !== 'undefined' && window.localStorage.getItem(STORAGE_REGION_CONFIRMED) === '1'
+  return { country, currency: currencyForCountry(country), confirmed }
+}
+
+/** Save the buyer's region and currency locally; callers sync it to the account and reload prices. */
+export function setRegionPreference(country: string, currency: string) {
+  if (typeof window === 'undefined') return
+  window.localStorage.setItem(STORAGE_COUNTRY, country)
+  window.localStorage.setItem(STORAGE_CURRENCY, currency)
+  window.localStorage.setItem(STORAGE_REGION_CONFIRMED, '1')
+  countryCache = country
+  locationPromise = null
 }
 
 function localeForCountry(country: string) {

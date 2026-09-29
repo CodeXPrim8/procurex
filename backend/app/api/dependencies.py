@@ -120,15 +120,6 @@ def _get_or_create_local_user(db: Session, supabase_user: dict) -> User:
     except ValueError:
         role = UserRole.BUYER
 
-    has_vendor_meta = bool(
-        role == UserRole.VENDOR
-        or metadata.get("company_name")
-        or metadata.get("business_registration_number")
-        or metadata.get("domain")
-    )
-    if has_vendor_meta:
-        role = UserRole.VENDOR
-
     user = db.query(User).filter(User.email == email).first()
     if not user:
         user = User(
@@ -141,21 +132,14 @@ def _get_or_create_local_user(db: Session, supabase_user: dict) -> User:
         db.add(user)
         db.commit()
         db.refresh(user)
-    else:
-        if metadata.get("full_name") and not user.full_name:
-            user.full_name = metadata.get("full_name")
-        if user.role == UserRole.VENDOR:
-            role = UserRole.VENDOR
-        elif has_vendor_meta and user.role != UserRole.VENDOR:
-            user.role = UserRole.VENDOR
-            role = UserRole.VENDOR
-            db.commit()
-            db.refresh(user)
+        return user
 
-    if role == UserRole.VENDOR:
-        from ..services.vendor_service import ensure_vendor_for_user
-        ensure_vendor_for_user(db, user, supabase_user)
+    if metadata.get("full_name") and user.full_name != metadata.get("full_name"):
+        user.full_name = metadata.get("full_name")
+        db.commit()
+        db.refresh(user)
 
+    # Vendor role is granted by POST /vendors after identity checks, not by auth metadata.
     return user
 
 
@@ -186,6 +170,16 @@ async def get_current_user(
     supabase_user = await _fetch_supabase_user(credentials.credentials)
     user = _get_or_create_local_user(db, supabase_user)
     return user
+
+
+def is_superadmin(user: Optional[User]) -> bool:
+    email = (getattr(user, "email", None) or "").strip().lower()
+    return bool(email and email == settings.superadmin_email)
+
+
+def is_admin_user(user: User) -> bool:
+    """Only the superadmin email has platform control. Role=admin is not enough."""
+    return is_superadmin(user)
 
 
 

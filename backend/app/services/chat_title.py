@@ -5,7 +5,21 @@ from typing import Iterable, List, Optional
 
 logger = logging.getLogger(__name__)
 
-PLACEHOLDER_TITLES = {"new chat", "newchat", "chat"}
+PLACEHOLDER_TITLES = {"new chat", "newchat", "chat", "greeting", "untitled"}
+GENERIC_LABELS = {
+    "quotation",
+    "vendors",
+    "product availability",
+    "pricing",
+    "laptops",
+    "phones",
+    "tablets",
+    "monitors",
+    "printers",
+    "accessories",
+    "software",
+    "services",
+}
 SMALLTALK = {
     "hello",
     "hi",
@@ -52,6 +66,8 @@ FILLER_PATTERNS = (
     re.compile(r"^(what(?:'s| is| are)|whats)\s+", re.I),
     re.compile(r"^(how much(?: is| are)?|how many)\s+", re.I),
     re.compile(r"^(tell me about|recommend|suggest)\s+", re.I),
+    re.compile(r"^(yes|yeah|yep|ok|okay)[,.\s]+", re.I),
+    re.compile(r"^(please\s+)?(generate|create|make)\s+(a |an |me )?", re.I),
 )
 SPEC_TAIL = re.compile(
     r"\s+(?:with|that has|that have|which has|which have)\b.*$",
@@ -68,6 +84,8 @@ TOPIC_RULES = (
     (re.compile(r"\b(?:monitors?|screens?)\b", re.I), "Monitors"),
     (re.compile(r"\bprinters?\b", re.I), "Printers"),
     (re.compile(r"\b(?:mouse|keyboard|headset|accessories)\b", re.I), "Accessories"),
+    (re.compile(r"\b(?:software|saas|crm|erp|app|apps)\b", re.I), "Software"),
+    (re.compile(r"\b(?:website|web design|web development|app development|service|services)\b", re.I), "Services"),
 )
 BRANDS = (
     "dell",
@@ -112,6 +130,11 @@ PRODUCT_WORDS = {
     "quotation",
     "quote",
     "quotes",
+    "software",
+    "saas",
+    "website",
+    "service",
+    "services",
 }
 SMALL_WORDS = {"a", "an", "the", "and", "or", "for", "of", "in", "on", "to", "with", "under"}
 ACRONYMS = {"hp", "ibm", "ram", "ssd", "hdd", "it", "rfq", "po", "gpu", "cpu", "usb", "wifi"}
@@ -144,7 +167,29 @@ def is_placeholder_title(title: Optional[str]) -> bool:
     if not title or not title.strip():
         return True
     cleaned = _plain(title)
-    return cleaned in PLACEHOLDER_TITLES or cleaned.startswith("chat ")
+    if cleaned in PLACEHOLDER_TITLES or cleaned.startswith("chat "):
+        return True
+    if re.fullmatch(r"greeting(?:\s+\d+)?", cleaned):
+        return True
+    return False
+
+
+def is_weak_title(title: Optional[str]) -> bool:
+    if is_placeholder_title(title):
+        return True
+    return is_smalltalk(title or "")
+
+
+def unique_chat_title(base: str, existing: Iterable[str]) -> str:
+    wanted = (base or "New chat").strip()[:80] or "New chat"
+    taken = {(item or "").strip().lower() for item in existing if (item or "").strip()}
+    if wanted.lower() not in taken:
+        return wanted
+    for number in range(2, 100):
+        candidate = f"{wanted} {number}"[:80]
+        if candidate.lower() not in taken:
+            return candidate
+    return f"{wanted} {int(__import__('time').time()) % 1000}"[:80]
 
 
 def is_smalltalk(text: str) -> bool:
@@ -200,7 +245,7 @@ def _meaningful_messages(messages: Iterable[str]) -> List[str]:
 def _compact_phrase(text: str) -> str:
     words = []
     for raw in text.split(" "):
-        token = re.sub(r"[^\w$%-]", "", raw)
+        token = re.sub(r"[^\w$%.-]", "", raw)
         if not token:
             continue
         if token.lower() in STOP_WORDS and len(words) > 0:
@@ -246,15 +291,20 @@ def _brand_product_title(text: str) -> Optional[str]:
     return None
 
 
-def heuristic_chat_title(messages: Iterable[str]) -> Optional[str]:
-    meaningful = _meaningful_messages(messages)
-    if not meaningful:
-        if any(_normalize(text) for text in messages):
-            return "Greeting"
-        return None
+def _named_product_title(text: str) -> Optional[str]:
+    match = re.search(
+        r"\b([a-z0-9][\w-]*\.(?:ng|com|io|app|ai|co|net|org|dev))\b",
+        text,
+        re.I,
+    )
+    return match.group(1) if match else None
 
-    source = meaningful[0]
+
+def _title_from_source(source: str) -> Optional[str]:
     stripped = _strip_fillers(source)
+    named = _named_product_title(stripped or source)
+    if named:
+        return named
     branded = _brand_product_title(stripped or source)
     if branded:
         return branded
@@ -273,10 +323,38 @@ def heuristic_chat_title(messages: Iterable[str]) -> Optional[str]:
     return None
 
 
+def _title_specificity(title: str, source: str) -> int:
+    score = 0
+    if "." in source:
+        score += 8
+    if _plain(title) not in GENERIC_LABELS:
+        score += 5
+    score += min(len(title.split()), 6)
+    return score
+
+
+def heuristic_chat_title(messages: Iterable[str]) -> Optional[str]:
+    meaningful = _meaningful_messages(messages)
+    if not meaningful:
+        if any(_normalize(text) for text in messages):
+            return "Greeting"
+        return None
+
+    best: Optional[str] = None
+    best_score = -1
+    for source in meaningful:
+        title = _title_from_source(source)
+        if not title:
+            continue
+        score = _title_specificity(title, source)
+        if score >= best_score:
+            best = title
+            best_score = score
+    return best
+
+
 def should_replace_title(current: Optional[str], messages: Iterable[str]) -> bool:
-    if is_placeholder_title(current):
-        return True
-    if is_smalltalk(current or ""):
+    if is_weak_title(current):
         return True
     texts = [text for text in messages if text]
     if not texts:
@@ -288,6 +366,13 @@ def should_replace_title(current: Optional[str], messages: Iterable[str]) -> boo
     if re.match(r"^\d{3,}\b", current_clean):
         return True
     if len(current_clean) > 42:
+        return True
+    proposed = heuristic_chat_title(texts)
+    if (
+        proposed
+        and _plain(current or "") in GENERIC_LABELS
+        and _plain(proposed) not in GENERIC_LABELS
+    ):
         return True
     return False
 

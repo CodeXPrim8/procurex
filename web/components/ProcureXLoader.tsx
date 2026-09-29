@@ -5,7 +5,7 @@ type ProcureXLoaderProps = {
 }
 
 export default function ProcureXLoader({
-  size = 48,
+  size = 80,
   label = 'Loading',
   className = '',
 }: ProcureXLoaderProps) {
@@ -17,7 +17,7 @@ export default function ProcureXLoader({
       aria-busy="true"
     >
       <img
-        src="/procurex-icon.png"
+        src="/images/procurex-loader.png"
         alt=""
         width={size}
         height={size}

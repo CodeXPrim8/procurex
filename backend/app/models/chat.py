@@ -16,6 +16,7 @@ class ChatSession(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    business_id = Column(Integer, ForeignKey("buyer_businesses.id"), nullable=True, index=True)
     title = Column(String, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

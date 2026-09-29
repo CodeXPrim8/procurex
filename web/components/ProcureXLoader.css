@@ -4,13 +4,15 @@
   justify-content: center;
   line-height: 0;
   position: relative;
+  background: transparent;
 }
 
 .procurex-loader__mark {
   display: block;
   object-fit: contain;
+  background: transparent;
   transform-origin: center center;
-  animation: procurex-loader-pulse 1.6s ease-in-out infinite;
+  animation: procurex-loader-pulse 2s ease-in-out infinite;
 }
 
 .procurex-loader__status {
@@ -32,8 +34,8 @@
     transform: scale(1);
   }
   50% {
-    opacity: 0.72;
-    transform: scale(0.96);
+    opacity: 0.42;
+    transform: scale(0.9);
   }
 }
 

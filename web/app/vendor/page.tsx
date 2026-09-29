@@ -3,34 +3,111 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { useRouter } from 'next/navigation'
 import { vendorsAPI, productAPI, apiErrorMessage } from '@/lib/api'
-import { persistVendorProfile, useRequireAuth } from '@/lib/auth'
+import { persistVendorProfile, useRequireAuth, isSuperAdmin } from '@/lib/auth'
+import { getAccessToken, ensureFreshSession } from '@/lib/sessionToken'
 import { useStore } from '@/lib/store'
 import { showToast } from '@/lib/toast'
 import { runBackendDiagnostics } from '@/lib/backendTest'
-import { PRODUCT_CATEGORIES, specFieldsFor } from '@/lib/productCategories'
+import { PRODUCT_CATEGORIES, GOODS_CATEGORIES, specFieldsFor, isDigitalCategory, generateProductSku, listingKind, allowsContactForPrice, isContactPriced, type PriceMode } from '@/lib/productCategories'
+import PricingModeToggle from '@/components/PricingModeToggle'
+import DeliveryModeToggle, { availabilityLabel, type DeliveryMode } from '@/components/DeliveryModeToggle'
 import { resolveMediaUrl, productImageList, MAX_PRODUCT_IMAGES } from '@/lib/media'
+import { VENDOR_ID_TYPES, validateVendorOnboarding, vendorCanList, vendorStatus } from '@/lib/vendorOnboarding'
 import Button from '@/components/ui/Button'
 import Input from '@/components/ui/Input'
 import Badge from '@/components/ui/Badge'
 import Modal from '@/components/ui/Modal'
 import PriceText from '@/components/PriceText'
 import ProcureXLoader from '@/components/ProcureXLoader'
+import SuperadminConsole from '@/components/SuperadminConsole'
+import BisonBookShell from '@/components/bisonbook/BisonBookShell'
 import { getCurrencyCode } from '@/lib/currency'
 import { 
  Package, Plus, Edit, Trash2, CheckCircle, AlertCircle, Building2, 
  Upload, Search, DollarSign, Box, TrendingUp, X, Image as ImageIcon,
  BarChart3, Settings, FileText, Eye, EyeOff, Save, Copy, MoreVertical,
- Grid3x3, List, Filter, Download, Share2, Info
+ Grid3x3, List, Filter, Download, Share2, Info, Sparkles, ShieldCheck, ShieldX, BookOpen
 } from 'lucide-react'
 
 type ProductFormMode = 'create' | 'search' | null
 type ViewMode = 'grid' | 'list'
 
+type ProductAssist = {
+ kind: 'goods' | 'software' | 'service'
+ kind_label: string
+ suggested_category: string | null
+ category_mismatch: boolean
+ description: string
+ note: string
+ image_rule: string
+}
+
+const STOCK_INPUT_CLASS =
+ 'bg-[#171717] text-[#ececec] placeholder-[#8e8e8e] border border-[#3d3d3d] rounded-lg focus:outline-none focus:ring-2 focus:ring-primary-500 text-sm font-medium'
+
+function csvCell(value: string | number) {
+ const text = String(value ?? '')
+ if (/[",\n]/.test(text)) return `"${text.replace(/"/g, '""')}"`
+ return text
+}
+
+function downloadCsv(filename: string, rows: Array<Array<string | number>>) {
+ const csv = rows.map((row) => row.map(csvCell).join(',')).join('\n')
+ const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' })
+ const url = URL.createObjectURL(blob)
+ const link = document.createElement('a')
+ link.href = url
+ link.download = filename
+ document.body.appendChild(link)
+ link.click()
+ link.remove()
+ URL.revokeObjectURL(url)
+}
+
+function ContactPriceNote() {
+ return (
+  <div className="rounded-lg border border-[#3d3d3d] bg-[#171717] px-3 py-2 text-sm text-[#b4b4b4]">
+   <p className="font-medium text-[#ececec]">Contact for price</p>
+   <p className="text-xs mt-0.5">Buyers call or message you for a quote. Keep your phone number up to date.</p>
+  </div>
+ )
+}
+
+function effectivePriceMode(category: string, mode?: string | null): PriceMode {
+ return allowsContactForPrice(category) && mode === 'contact' ? 'contact' : 'fixed'
+}
+
+async function copyToClipboard(text: string) {
+ const fallbackCopy = () => {
+  const field = document.createElement('textarea')
+  field.value = text
+  field.setAttribute('readonly', '')
+  field.style.position = 'fixed'
+  field.style.left = '-9999px'
+  document.body.appendChild(field)
+  field.select()
+  const copied = document.execCommand('copy')
+  field.remove()
+  return copied
+ }
+ try {
+  if (!navigator.clipboard?.writeText) return fallbackCopy()
+  await Promise.race([
+   navigator.clipboard.writeText(text),
+   new Promise((_, reject) => setTimeout(() => reject(new Error('clipboard timeout')), 800)),
+  ])
+  return true
+ } catch {
+  return fallbackCopy()
+ }
+}
+
 export default function VendorDashboard() {
  const { user } = useRequireAuth()
- const { setUser } = useStore()
+ const { setUser, setAccountView } = useStore()
  const router = useRouter()
  const [vendor, setVendor] = useState<any>(null)
+ const [platformMode, setPlatformMode] = useState(false)
  const [products, setProducts] = useState<any[]>([])
  const [loading, setLoading] = useState(true)
  const [showProductModal, setShowProductModal] = useState(false)
@@ -38,7 +115,12 @@ export default function VendorDashboard() {
  const [editingProduct, setEditingProduct] = useState<any>(null)
  const [viewMode, setViewMode] = useState<ViewMode>('grid')
  const [searchFilter, setSearchFilter] = useState('')
- const [activeTab, setActiveTab] = useState<'products' | 'info' | 'analytics'>('products')
+ const [activeTab, setActiveTab] = useState<'products' | 'info' | 'analytics' | 'bisonbook'>('products')
+
+ useEffect(() => {
+ const tab = new URLSearchParams(window.location.search).get('tab')
+ if (tab === 'bisonbook' || tab === 'info' || tab === 'analytics') setActiveTab(tab)
+ }, [])
  const [currencyCode, setCurrencyCode] = useState('NGN')
  
  // Product search state
@@ -55,11 +137,16 @@ export default function VendorDashboard() {
  specifications: {} as Record<string, any>,
  stock_quantity: 0,
  price: 0,
+ price_mode: 'fixed' as PriceMode,
+ delivery_mode: '' as DeliveryMode | '',
  image_url: '',
  })
  const [isCreatingProduct, setIsCreatingProduct] = useState(false)
  const [productImageFiles, setProductImageFiles] = useState<File[]>([])
  const [productImagePreviews, setProductImagePreviews] = useState<string[]>([])
+ const [productAssist, setProductAssist] = useState<ProductAssist | null>(null)
+ const [assistLoading, setAssistLoading] = useState(false)
+ const [descriptionTouched, setDescriptionTouched] = useState(false)
  
  // Vendor registration state
  const [vendorFormData, setVendorFormData] = useState({
@@ -68,11 +155,17 @@ export default function VendorDashboard() {
  domain: '',
  phone: '',
  address: '',
+ personalName: '',
+ idType: 'National ID (NIN)',
+ idNumber: '',
+ termsAccepted: false,
  })
  const [vendorErrors, setVendorErrors] = useState<Record<string, string>>({})
  const [isRegistering, setIsRegistering] = useState(false)
  const [showRegisterForm, setShowRegisterForm] = useState(false)
  const [isEditingVendor, setIsEditingVendor] = useState(false)
+ const [uploadingDoc, setUploadingDoc] = useState('')
+ const [submittingReview, setSubmittingReview] = useState(false)
 
  // Prevent multiple simultaneous loads
  const loadingRef = useRef(false)
@@ -80,7 +173,24 @@ export default function VendorDashboard() {
  const userRef = useRef(user)
  const profileSyncedRef = useRef(false)
  const fileInputRef = useRef<HTMLInputElement>(null)
+ const assistTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+ const descriptionTouchedRef = useRef(false)
  userRef.current = user
+ descriptionTouchedRef.current = descriptionTouched
+
+ const hydrateVendorForm = (data: any) => {
+ setVendorFormData({
+ companyName: data?.company_name || '',
+ businessRegistrationNumber: data?.business_registration_number || '',
+ domain: data?.domain || '',
+ phone: data?.phone || '',
+ address: data?.business_address || data?.address || '',
+ personalName: data?.personal_name || '',
+ idType: data?.id_type || 'National ID (NIN)',
+ idNumber: data?.id_number || '',
+ termsAccepted: Boolean(data?.terms_accepted_at),
+ })
+ }
 
  const checkPendingRegistration = useCallback(async () => {
  const pendingVendorData = localStorage.getItem('pending_vendor_registration')
@@ -93,6 +203,10 @@ export default function VendorDashboard() {
  domain: vendorData.domain || '',
  phone: vendorData.phone || '',
  address: vendorData.address || '',
+ personalName: vendorData.personal_name || '',
+ idType: vendorData.id_type || 'National ID (NIN)',
+ idNumber: vendorData.id_number || '',
+ termsAccepted: Boolean(vendorData.terms_accepted),
  })
  } catch (error) {
  console.error('Error parsing pending vendor data:', error)
@@ -107,15 +221,26 @@ export default function VendorDashboard() {
  const isFirstPaint = !vendorRef.current
  if (isFirstPaint) setLoading(true)
 
+ const token = (await getAccessToken()) || (await ensureFreshSession())
+ if (!token) {
+  setLoading(false)
+  loadingRef.current = false
+  router.replace('/login?redirect=/vendor')
+  return
+ }
+
  try {
  const vendorData = await vendorsAPI.getMyVendor()
  vendorRef.current = vendorData
  setVendor(vendorData)
+ hydrateVendorForm(vendorData)
+ setAccountView('vendor')
  localStorage.removeItem('pending_vendor_registration')
 
  if (!profileSyncedRef.current && userRef.current?.role !== 'vendor' && vendorData?.company_name) {
  profileSyncedRef.current = true
- void persistVendorProfile({ company_name: vendorData.company_name })
+ const vendorUser = await persistVendorProfile({ company_name: vendorData.company_name })
+ if (vendorUser) setUser(vendorUser)
  } else {
  profileSyncedRef.current = true
  }
@@ -133,39 +258,42 @@ export default function VendorDashboard() {
  localStorage.removeItem('pending_vendor_registration')
  }
  }
- const pendingForThisUser = Boolean(
- pending &&
- (!pending.email || pending.email.toLowerCase() === (userRef.current?.email || '').toLowerCase())
- )
- if (!pendingForThisUser) {
+ if (!pending?.company_name) {
+ const status = error?.response?.status
+ if (status === 404 && isSuperAdmin(userRef.current)) {
+ setPlatformMode(true)
  setLoading(false)
  loadingRef.current = false
- if (userRef.current?.role !== 'vendor') {
+ return
+ }
+ if (status === 404 && userRef.current?.role !== 'vendor') {
+ useStore.getState().setHasVendorAccount(false)
  router.replace('/chat')
  }
  return
  }
-
- const companyName = pending?.company_name || userRef.current?.full_name || 'My Company'
  try {
  const created = await vendorsAPI.register({
- company_name: companyName,
- business_registration_number: pending?.business_registration_number,
- domain: pending?.domain,
- phone: pending?.phone,
- address: pending?.address,
+ company_name: pending.company_name,
+ business_registration_number: pending.business_registration_number,
+ domain: pending.domain,
+ phone: pending.phone,
+ address: pending.address,
  })
  vendorRef.current = created
  setVendor(created)
+ hydrateVendorForm(created)
+ setAccountView('vendor')
  if (!profileSyncedRef.current) {
  profileSyncedRef.current = true
- void persistVendorProfile({
+ const vendorUser = await persistVendorProfile({
  company_name: created.company_name,
  business_registration_number: created.business_registration_number,
  domain: created.domain,
  phone: created.phone,
  address: created.address,
  })
+ if (vendorUser) setUser(vendorUser)
  }
  localStorage.removeItem('pending_vendor_registration')
  try {
@@ -176,13 +304,7 @@ export default function VendorDashboard() {
  }
  } catch (registerError) {
  console.error('Auto vendor setup failed:', registerError)
- const fallback = {
- company_name: companyName,
- verification_status: 'pending',
- }
- vendorRef.current = fallback
- setVendor(fallback)
- setProducts([])
+ router.replace('/chat')
  }
  } finally {
  setLoading(false)
@@ -196,26 +318,22 @@ export default function VendorDashboard() {
 
  useEffect(() => {
  if (!user?.id) return
- const pendingRaw = localStorage.getItem('pending_vendor_registration')
- let pending: any = null
- if (pendingRaw) {
- try {
- pending = JSON.parse(pendingRaw)
- } catch {
- localStorage.removeItem('pending_vendor_registration')
- }
- }
- const pendingForThisUser = Boolean(
- pending &&
- (!pending.email || pending.email.toLowerCase() === (user.email || '').toLowerCase())
- )
- if (user.role !== 'vendor' && !pendingForThisUser) {
- router.replace('/chat')
- return
- }
  loadVendorData()
  checkPendingRegistration()
- }, [user?.id, user?.role, user?.email, loadVendorData, checkPendingRegistration, router])
+ }, [user?.id, user?.email, loadVendorData, checkPendingRegistration])
+
+ useEffect(() => {
+ const refresh = () => {
+ if (document.visibilityState && document.visibilityState !== 'visible') return
+ void loadVendorData()
+ }
+ window.addEventListener('focus', refresh)
+ document.addEventListener('visibilitychange', refresh)
+ return () => {
+ window.removeEventListener('focus', refresh)
+ document.removeEventListener('visibilitychange', refresh)
+ }
+ }, [loadVendorData])
 
  const handleSearchProducts = async () => {
  if (!productSearch.trim()) {
@@ -237,24 +355,29 @@ export default function VendorDashboard() {
  }
 
  const handleCreateProduct = async () => {
- if (!newProduct.name.trim() || !newProduct.sku.trim() || !newProduct.category.trim()) {
- showToast('Please fill in all required fields (Name, SKU, Category)', 'error')
+ if (!newProduct.name.trim() || !newProduct.category.trim()) {
+ showToast('Please fill in all required fields (Name, Category)', 'error')
  return
  }
 
- if (newProduct.price <= 0) {
+ const createPriceMode = effectivePriceMode(newProduct.category, newProduct.price_mode)
+ if (createPriceMode === 'fixed' && newProduct.price <= 0) {
  showToast('Price must be greater than 0', 'error')
+ return
+ }
+ if (newProduct.category === 'Service' && !newProduct.delivery_mode) {
+ showToast('Choose whether this service is delivered remotely or onsite', 'error')
  return
  }
 
  const requiredSpecs = specFieldsFor(newProduct.category).filter((field) => field.required)
  const missingSpec = requiredSpecs.find((field) => !String(newProduct.specifications[field.key] || '').trim())
  if (missingSpec) {
- showToast(`${missingSpec.label} is required for ${newProduct.category}s`, 'error')
+ showToast(`${missingSpec.label} is required for this ${newProduct.category.toLowerCase()}`, 'error')
  return
  }
 
- if (!productImageFiles.length && !newProduct.image_url) {
+ if (!isDigitalCategory(newProduct.category) && !productImageFiles.length && !newProduct.image_url) {
  showToast('Upload at least one clear photo of this product', 'error')
  return
  }
@@ -279,7 +402,7 @@ export default function VendorDashboard() {
  await vendorsAPI.createProduct({
  product: {
  name: newProduct.name.trim(),
- sku: newProduct.sku.trim().toUpperCase(),
+ sku: generateProductSku(newProduct.name, newProduct.category),
  category: newProduct.category,
  description: newProduct.description.trim() || undefined,
  specifications: Object.keys(specifications).length > 0 ? specifications : undefined,
@@ -287,7 +410,9 @@ export default function VendorDashboard() {
  image_urls: imageUrls,
  },
  stock_quantity: newProduct.stock_quantity,
- price: Math.round(newProduct.price * 100),
+ price: createPriceMode === 'contact' ? 0 : Math.round(newProduct.price * 100),
+ price_mode: createPriceMode,
+ delivery_mode: newProduct.category === 'Service' ? newProduct.delivery_mode : undefined,
  })
 
  showToast('Product created successfully!', 'success')
@@ -305,9 +430,10 @@ export default function VendorDashboard() {
  new Promise<{ ok: boolean; url: string }>((resolve) => {
  const objectUrl = URL.createObjectURL(file)
  const probe = new window.Image()
+ const minSide = isDigitalCategory(newProduct.category) ? 200 : 400
  probe.onload = () => {
  resolve({
- ok: Math.min(probe.naturalWidth, probe.naturalHeight) >= 400,
+ ok: Math.min(probe.naturalWidth, probe.naturalHeight) >= minSide,
  url: objectUrl,
  })
  }
@@ -339,7 +465,12 @@ export default function VendorDashboard() {
  }
  const probed = await probeImage(file)
  if (!probed.ok) {
- showToast('Use a clear product photo at least 400px on the shortest side', 'error')
+ showToast(
+ isDigitalCategory(newProduct.category)
+ ? 'Use a clear logo, screenshot, or portfolio image at least 200px on the shortest side'
+ : 'Use a clear product photo at least 400px on the shortest side',
+ 'error'
+ )
  continue
  }
  acceptedFiles.push(file)
@@ -379,11 +510,23 @@ export default function VendorDashboard() {
  return
  }
 
+ const addPriceMode = effectivePriceMode(product.category, newProduct.price_mode)
+ if (addPriceMode === 'fixed' && newProduct.price <= 0) {
+ showToast('Price must be greater than 0', 'error')
+ return
+ }
+ if (product.category === 'Service' && !newProduct.delivery_mode) {
+ showToast('Choose whether this service is delivered remotely or onsite', 'error')
+ return
+ }
+
  try {
  await vendorsAPI.addProduct({
  product_id: product.id,
  stock_quantity: newProduct.stock_quantity,
- price: Math.round(newProduct.price * 100),
+ price: addPriceMode === 'contact' ? 0 : Math.round(newProduct.price * 100),
+ price_mode: addPriceMode,
+ delivery_mode: product.category === 'Service' ? newProduct.delivery_mode : undefined,
  })
  
  showToast('Product added successfully', 'success')
@@ -397,8 +540,9 @@ export default function VendorDashboard() {
 
  const handleUpdateProduct = async () => {
  if (!editingProduct) return
- 
- if (editingProduct.price <= 0) {
+
+ const editPriceMode = effectivePriceMode(editingProduct.product?.category || '', editingProduct.price_mode)
+ if (editPriceMode === 'fixed' && editingProduct.price <= 0) {
  showToast('Price must be greater than 0', 'error')
  return
  }
@@ -407,7 +551,9 @@ export default function VendorDashboard() {
  await vendorsAPI.updateProduct(editingProduct.id, {
  product_id: editingProduct.product_id,
  stock_quantity: editingProduct.stock_quantity,
- price: Math.round(editingProduct.price * 100),
+ price: editPriceMode === 'contact' ? 0 : Math.round(editingProduct.price * 100),
+ price_mode: editPriceMode,
+ delivery_mode: editingProduct.product?.category === 'Service' ? editingProduct.delivery_mode || 'onsite' : undefined,
  })
  
  showToast('Product updated successfully', 'success')
@@ -443,13 +589,86 @@ export default function VendorDashboard() {
  }
  }
 
- const handleUpdateVendor = async () => {
- const newErrors: Record<string, string> = {}
- 
- if (!vendorFormData.companyName.trim()) {
- newErrors.companyName = 'Company name is required'
+ const handleExportProducts = () => {
+ if (!products.length) {
+ showToast('No products to export', 'warning')
+ return
  }
- 
+ const rows: Array<Array<string | number>> = [
+ ['Name', 'SKU', 'Category', 'Price (NGN)', 'Stock', 'Status', 'Description'],
+ ...products.map((item) => [
+ item.product?.name || '',
+ item.product?.sku || '',
+ item.product?.category || '',
+ isContactPriced(item) ? 'Contact for price' : item.price ?? 0,
+ item.stock_quantity ?? 0,
+ item.stock_quantity > 0 ? 'In Stock' : 'Out of Stock',
+ item.product?.description || '',
+ ]),
+ ]
+ downloadCsv(`procurex-catalog-${new Date().toISOString().slice(0, 10)}.csv`, rows)
+ showToast('Product catalog exported', 'success')
+ }
+
+ const handleShareCatalog = async () => {
+ const origin = typeof window !== 'undefined' ? window.location.origin : ''
+ const catalogUrl = `${origin}/products`
+ const company = vendor?.company_name || 'ProcureX vendor'
+ const copied = await copyToClipboard(catalogUrl)
+ if (copied) {
+  showToast('Catalog link copied to clipboard', 'success')
+ } else {
+  window.prompt('Copy this catalog link:', catalogUrl)
+ }
+ if (typeof navigator.share === 'function' && /Mobi|Android/i.test(navigator.userAgent)) {
+  navigator.share({
+   title: `${company} catalog`,
+   text: `${company} catalog on ProcureX`,
+   url: catalogUrl,
+  }).catch(() => undefined)
+ }
+ }
+
+ const handleViewReports = () => {
+ const inventoryValue = products.reduce((sum, item) => sum + (item.price * item.stock_quantity), 0)
+ const averagePrice = pricedProducts.length
+ ? pricedProducts.reduce((sum, item) => sum + item.price, 0) / pricedProducts.length
+ : 0
+ const rows: Array<Array<string | number>> = [
+ ['Metric', 'Value'],
+ ['Vendor', vendor?.company_name || ''],
+ ['Generated', new Date().toISOString()],
+ ['Total products', products.length],
+ ['In stock', inStockProducts],
+ ['Out of stock', outOfStockProducts],
+ ['Inventory value (NGN)', inventoryValue],
+ ['Average price (NGN)', Math.round(averagePrice)],
+ [],
+ ['Name', 'SKU', 'Category', 'Price (NGN)', 'Stock', 'Line value (NGN)'],
+ ...products.map((item) => [
+ item.product?.name || '',
+ item.product?.sku || '',
+ item.product?.category || '',
+ isContactPriced(item) ? 'Contact for price' : item.price ?? 0,
+ item.stock_quantity ?? 0,
+ (item.price ?? 0) * (item.stock_quantity ?? 0),
+ ]),
+ ]
+ downloadCsv(`procurex-report-${new Date().toISOString().slice(0, 10)}.csv`, rows)
+ showToast('Analytics report downloaded', 'success')
+ }
+
+ const handleUpdateVendor = async () => {
+ const newErrors = validateVendorOnboarding({
+ companyName: vendorFormData.companyName,
+ businessRegistrationNumber: vendorFormData.businessRegistrationNumber,
+ phone: vendorFormData.phone,
+ address: vendorFormData.address,
+ personalName: vendorFormData.personalName,
+ idType: vendorFormData.idType,
+ idNumber: vendorFormData.idNumber,
+ termsAccepted: vendorFormData.termsAccepted || Boolean(vendor?.terms_accepted_at),
+ })
  setVendorErrors(newErrors)
  if (Object.keys(newErrors).length > 0) return
 
@@ -457,10 +676,14 @@ export default function VendorDashboard() {
  try {
  const vendorData = {
  company_name: vendorFormData.companyName.trim(),
- business_registration_number: vendorFormData.businessRegistrationNumber?.trim() || undefined,
+ business_registration_number: vendorFormData.businessRegistrationNumber.trim(),
  domain: vendorFormData.domain?.trim() || undefined,
- phone: vendorFormData.phone?.trim() || undefined,
- address: vendorFormData.address?.trim() || undefined,
+ phone: vendorFormData.phone.trim(),
+ address: vendorFormData.address.trim(),
+ personal_name: vendorFormData.personalName.trim(),
+ id_type: vendorFormData.idType,
+ id_number: vendorFormData.idNumber.trim(),
+ terms_accepted: vendorFormData.termsAccepted || Boolean(vendor?.terms_accepted_at),
  }
 
  if (vendor) {
@@ -568,21 +791,105 @@ export default function VendorDashboard() {
  specifications: {},
  stock_quantity: 0,
  price: 0,
+ price_mode: 'fixed',
+ delivery_mode: '',
  image_url: '',
  })
+ setProductAssist(null)
+ setAssistLoading(false)
+ setDescriptionTouched(false)
  setProductSearch('')
  setSearchResults([])
  setProductFormMode(null)
  setEditingProduct(null)
  }
 
+ const handleUploadVerificationDoc = async (
+ documentType: 'id_document' | 'address_bill' | 'company_certificate',
+ file?: File | null
+ ) => {
+ if (!file) return
+ setUploadingDoc(documentType)
+ try {
+ const result = await vendorsAPI.uploadDocument(file, documentType)
+ if (result.vendor) {
+ setVendor(result.vendor)
+ hydrateVendorForm(result.vendor)
+ } else {
+ await loadVendorData()
+ }
+ showToast('Document uploaded', 'success')
+ } catch (error: any) {
+ showToast(apiErrorMessage(error, 'Could not upload that document.'), 'error')
+ } finally {
+ setUploadingDoc('')
+ }
+ }
+
+ const handleSubmitForReview = async () => {
+ setSubmittingReview(true)
+ try {
+ const updated = await vendorsAPI.submitForReview()
+ setVendor(updated)
+ hydrateVendorForm(updated)
+ showToast('Application submitted for ProcureX review.', 'success')
+ } catch (error: any) {
+ showToast(apiErrorMessage(error, 'Could not submit for review.'), 'error')
+ } finally {
+ setSubmittingReview(false)
+ }
+ }
+
  const openCreateProductModal = () => {
+ if (!vendorCanList(vendor)) {
+ showToast(vendor?.next_step || 'Complete verification before listing products.', 'warning')
+ setActiveTab('info')
+ return
+ }
  resetProductForm()
  setProductFormMode('create')
  setShowProductModal(true)
  }
 
+ useEffect(() => {
+ if (productFormMode !== 'create' || !newProduct.category || newProduct.name.trim().length < 3) {
+ setProductAssist(null)
+ setAssistLoading(false)
+ return
+ }
+ if (assistTimerRef.current) clearTimeout(assistTimerRef.current)
+ assistTimerRef.current = setTimeout(async () => {
+ setAssistLoading(true)
+ try {
+ const result = await vendorsAPI.assistProduct({
+ name: newProduct.name.trim(),
+ category: newProduct.category,
+ specifications: newProduct.specifications,
+ description: descriptionTouchedRef.current ? newProduct.description : '',
+ })
+ setProductAssist(result)
+ setNewProduct((prev) => {
+ if (descriptionTouchedRef.current || prev.description.trim()) return prev
+ if (!result.description) return prev
+ return { ...prev, description: result.description }
+ })
+ } catch {
+ setProductAssist(null)
+ } finally {
+ setAssistLoading(false)
+ }
+ }, 700)
+ return () => {
+ if (assistTimerRef.current) clearTimeout(assistTimerRef.current)
+ }
+ }, [productFormMode, newProduct.name, newProduct.category, newProduct.specifications])
+
  const openSearchProductModal = () => {
+ if (!vendorCanList(vendor)) {
+ showToast(vendor?.next_step || 'Complete verification before listing products.', 'warning')
+ setActiveTab('info')
+ return
+ }
  resetProductForm()
  setProductFormMode('search')
  setShowProductModal(true)
@@ -597,13 +904,16 @@ export default function VendorDashboard() {
  setShowProductModal(true)
  }
 
+ const selectedSearchCategory = searchResults.find((p) => p.name === productSearch)?.category || ''
+ const pricedProducts = products.filter((p) => !isContactPriced(p))
+
  // Calculate stats
  const totalProducts = products.length
  const inStockProducts = products.filter(p => p.stock_quantity > 0).length
  const outOfStockProducts = products.filter(p => p.stock_quantity === 0).length
  const totalValue = products.reduce((sum, p) => sum + (p.price * p.stock_quantity), 0) / 100
- const averagePrice = products.length > 0 
- ? products.reduce((sum, p) => sum + (p.price / 100), 0) / products.length 
+ const averagePrice = pricedProducts.length > 0
+ ? pricedProducts.reduce((sum, p) => sum + (p.price / 100), 0) / pricedProducts.length
  : 0
 
  // Filter products
@@ -617,24 +927,22 @@ export default function VendorDashboard() {
  )
  })
 
- if (loading && !vendor) {
+ if (loading && !vendor && !platformMode) {
  return (
  <div className="min-h-screen flex items-center justify-center bg-[#212121]">
- <div className="text-center">
- <div className="inline-block animate-spin rounded-full h-12 w-12 border-b-2 border-primary-600"></div>
- <p className="mt-4 text-[#b4b4b4]">Loading dashboard...</p>
- </div>
+ <ProcureXLoader size={128} label="Loading dashboard" />
  </div>
  )
+ }
+
+ if (platformMode) {
+ return <SuperadminConsole />
  }
 
  if (!vendor) {
  return (
  <div className="min-h-screen flex items-center justify-center bg-[#212121]">
- <div className="text-center">
- <div className="inline-block animate-spin rounded-full h-12 w-12 border-b-2 border-primary-600"></div>
- <p className="mt-4 text-[#b4b4b4]">Opening your dashboard...</p>
- </div>
+ <ProcureXLoader size={128} label="Opening procurement chat" />
  </div>
  )
  }
@@ -643,7 +951,21 @@ export default function VendorDashboard() {
  verified: 'success',
  pending: 'warning',
  rejected: 'danger',
+ revoked: 'danger',
  }
+ const status = vendorStatus(vendor)
+ const listingLocked = !vendorCanList(vendor)
+ const blocked = status === 'revoked' || status === 'rejected'
+ const statusLabel =
+  status === 'verified'
+   ? 'Verified'
+   : status === 'revoked'
+     ? 'Revoked'
+     : status === 'rejected'
+       ? 'Rejected'
+       : vendor.submitted
+         ? 'In review'
+         : 'Unverified'
 
  return (
  <div className="min-h-dvh bg-[#212121]">
@@ -656,75 +978,151 @@ export default function VendorDashboard() {
  <p className="text-[#b4b4b4] mt-1 truncate">Welcome back, {vendor.company_name}</p>
  </div>
  <div className="flex items-center gap-3 flex-wrap">
- <Badge variant={(verificationColors[vendor.verification_status] || 'default') as 'success' | 'warning' | 'danger' | 'default'} className="text-sm px-3 py-1">
- {vendor.verification_status === 'verified' && <CheckCircle className="w-4 h-4 mr-1 inline" />}
- {vendor.verification_status === 'pending' && <AlertCircle className="w-4 h-4 mr-1 inline" />}
- {vendor.verification_status || 'Not Verified'}
+ <Badge variant={(verificationColors[status] || 'default') as 'success' | 'warning' | 'danger' | 'default'} className="text-sm px-3 py-1">
+ {status === 'verified' && <CheckCircle className="w-4 h-4 mr-1 inline" />}
+ {status === 'pending' && <AlertCircle className="w-4 h-4 mr-1 inline" />}
+ {(status === 'rejected' || status === 'revoked') && <ShieldX className="w-4 h-4 mr-1 inline" />}
+ {statusLabel}
  </Badge>
+ {!listingLocked ? (
  <Button onClick={openCreateProductModal} className="bg-primary-600 hover:bg-primary-700 flex-1 sm:flex-none">
  <Plus className="w-5 h-5 mr-2" />
  Add Product
  </Button>
+ ) : null}
  </div>
  </div>
  </div>
  </div>
 
  <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4 sm:py-8">
+ {listingLocked ? (
+ <div className={`mb-6 rounded-xl border bg-[#2f2f2f] p-4 sm:p-5 ${blocked ? 'border-red-700/60' : 'border-amber-700/50'}`}>
+ <div className="flex items-start gap-3">
+ {blocked ? (
+ <ShieldX className="w-6 h-6 text-red-400 shrink-0 mt-0.5" />
+ ) : (
+ <ShieldCheck className="w-6 h-6 text-amber-400 shrink-0 mt-0.5" />
+ )}
+ <div className="min-w-0 flex-1">
+ <h2 className="text-lg font-semibold text-[#ececec]">
+ {status === 'revoked'
+  ? 'Verification revoked'
+  : status === 'rejected'
+    ? 'Application rejected'
+    : vendor.submitted
+      ? 'Application in review'
+      : 'Verify this business before listing'}
+ </h2>
+ <p className="text-sm text-[#b4b4b4] mt-1">
+ {status === 'revoked'
+  ? (vendor.verification_notes || 'ProcureX revoked this account. Your products are hidden from buyers until you are approved again.')
+  : status === 'rejected'
+    ? (vendor.verification_notes || 'ProcureX rejected this application. Fix the issues below and resubmit.')
+    : (vendor.next_step || 'Complete identity checks. Unverified vendors are hidden from buyers and chat search.')}
+ </p>
+ {Array.isArray(vendor.missing_requirements) && vendor.missing_requirements.length > 0 ? (
+ <ul className="mt-3 text-sm text-[#ececec] list-disc pl-5 space-y-1">
+ {vendor.missing_requirements.map((item: string) => (
+ <li key={item}>{item}</li>
+ ))}
+ </ul>
+ ) : null}
+ <div className="mt-4 flex flex-wrap gap-2">
+ <Button type="button" variant="outline" onClick={() => setActiveTab('info')}>
+ {blocked ? 'Fix details' : 'Complete verification'}
+ </Button>
+ <Button
+ type="button"
+ onClick={() => void handleSubmitForReview()}
+ isLoading={submittingReview}
+ disabled={Boolean(vendor.missing_requirements?.length) || vendor.submitted}
+ >
+ {vendor.submitted ? 'In review' : blocked ? 'Resubmit for review' : 'Submit for review'}
+ </Button>
+ </div>
+ </div>
+ </div>
+ </div>
+ ) : null}
+
+ {Array.isArray(vendor.admin_advice) && vendor.admin_advice.length > 0 ? (
+ <div className="mb-6 rounded-xl border border-[#19C37D]/40 bg-[#2f2f2f] p-4 sm:p-5">
+ <div className="flex items-start gap-3">
+ <Info className="w-6 h-6 text-[#19C37D] shrink-0 mt-0.5" />
+ <div className="min-w-0 flex-1">
+ <h2 className="text-lg font-semibold text-[#ececec]">ProcureX advice</h2>
+ <p className="text-sm text-[#b4b4b4] mt-1">The platform team left notes on your account or listings.</p>
+ <div className="mt-3 space-y-2">
+ {vendor.admin_advice.slice(0, 6).map((item: any) => (
+ <div key={item.id} className="rounded-lg bg-[#171717] px-3 py-2">
+ <p className="text-sm text-[#ececec]">{item.message}</p>
+ <p className="text-xs text-[#8e8e8e] mt-1">
+ {item.product_name ? `${item.product_name} · ` : ''}
+ {item.created_at ? new Date(item.created_at).toLocaleString() : ''}
+ </p>
+ </div>
+ ))}
+ </div>
+ </div>
+ </div>
+ </div>
+ ) : null}
+
  {/* Stats Cards */}
- <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-6 mb-6 sm:mb-8">
- <div className="bg-[#2f2f2f] rounded-xl p-4 sm:p-6 border border-[#2f2f2f] hover:bg-[#353535] transition-shadow">
- <div className="flex items-center justify-between">
- <div>
- <p className="text-xs sm:text-sm font-medium text-[#b4b4b4] uppercase tracking-wide">Total Products</p>
- <p className="text-2xl sm:text-3xl font-bold text-[#ececec] mt-2">{totalProducts}</p>
- <p className="text-xs text-[#8e8e8e] mt-1">{inStockProducts} in stock</p>
+ <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4 mb-6 sm:mb-8">
+ <div className="bg-[#2f2f2f] rounded-xl p-3 sm:p-4 border border-[#2f2f2f] hover:bg-[#353535] transition-shadow min-w-0">
+ <div className="flex items-center justify-between gap-2">
+ <div className="min-w-0">
+ <p className="text-[11px] font-medium text-[#b4b4b4] uppercase tracking-wide">Total Products</p>
+ <p className="text-lg sm:text-xl font-bold text-[#ececec] mt-1 whitespace-nowrap tabular-nums">{totalProducts}</p>
+ <p className="text-[11px] text-[#8e8e8e] mt-1">{inStockProducts} in stock</p>
  </div>
- <div className="p-2 sm:p-3 bg-[#171717] rounded-lg hidden sm:block">
- <Package className="w-8 h-8 text-primary-600" />
- </div>
- </div>
- </div>
-
- <div className="bg-[#2f2f2f] rounded-xl p-4 sm:p-6 border border-[#2f2f2f] hover:bg-[#353535] transition-shadow">
- <div className="flex items-center justify-between">
- <div>
- <p className="text-xs sm:text-sm font-medium text-[#b4b4b4] uppercase tracking-wide">In Stock</p>
- <p className="text-2xl sm:text-3xl font-bold text-green-600 mt-2">{inStockProducts}</p>
- <p className="text-xs text-[#8e8e8e] mt-1">{outOfStockProducts} out of stock</p>
- </div>
- <div className="p-3 bg-green-100 rounded-lg hidden sm:block">
- <CheckCircle className="w-8 h-8 text-green-600" />
+ <div className="p-2 bg-[#171717] rounded-lg hidden lg:block shrink-0">
+ <Package className="w-5 h-5 text-primary-600" />
  </div>
  </div>
  </div>
 
- <div className="bg-[#2f2f2f] rounded-xl p-4 sm:p-6 border border-[#2f2f2f] hover:bg-[#353535] transition-shadow">
- <div className="flex items-center justify-between">
- <div>
- <p className="text-xs sm:text-sm font-medium text-[#b4b4b4] uppercase tracking-wide">Inventory Value</p>
- <p className="text-xl sm:text-3xl font-bold text-blue-600 mt-2 break-all">
+ <div className="bg-[#2f2f2f] rounded-xl p-3 sm:p-4 border border-[#2f2f2f] hover:bg-[#353535] transition-shadow min-w-0">
+ <div className="flex items-center justify-between gap-2">
+ <div className="min-w-0">
+ <p className="text-[11px] font-medium text-[#b4b4b4] uppercase tracking-wide">In Stock</p>
+ <p className="text-lg sm:text-xl font-bold text-green-600 mt-1 whitespace-nowrap tabular-nums">{inStockProducts}</p>
+ <p className="text-[11px] text-[#8e8e8e] mt-1">{outOfStockProducts} out of stock</p>
+ </div>
+ <div className="p-2 bg-green-900/30 rounded-lg hidden lg:block shrink-0">
+ <CheckCircle className="w-5 h-5 text-green-600" />
+ </div>
+ </div>
+ </div>
+
+ <div className="bg-[#2f2f2f] rounded-xl p-3 sm:p-4 border border-[#2f2f2f] hover:bg-[#353535] transition-shadow min-w-0">
+ <div className="flex items-center justify-between gap-2">
+ <div className="min-w-0">
+ <p className="text-[11px] font-medium text-[#b4b4b4] uppercase tracking-wide">Inventory Value</p>
+ <p className="text-sm sm:text-base font-bold text-blue-400 mt-1 whitespace-nowrap tabular-nums leading-tight">
  <PriceText amount={products.reduce((sum, p) => sum + (p.price * p.stock_quantity), 0)} />
  </p>
- <p className="text-xs text-[#8e8e8e] mt-1">Total stock value</p>
+ <p className="text-[11px] text-[#8e8e8e] mt-1">Total stock value</p>
  </div>
- <div className="p-3 bg-blue-100 rounded-lg hidden sm:block">
- <DollarSign className="w-8 h-8 text-blue-600" />
+ <div className="p-2 bg-[#171717] rounded-lg hidden xl:block shrink-0">
+ <DollarSign className="w-5 h-5 text-blue-400" />
  </div>
  </div>
  </div>
 
- <div className="bg-[#2f2f2f] rounded-xl p-4 sm:p-6 border border-[#2f2f2f] hover:bg-[#353535] transition-shadow">
- <div className="flex items-center justify-between">
- <div>
- <p className="text-xs sm:text-sm font-medium text-[#b4b4b4] uppercase tracking-wide">Avg. Price</p>
- <p className="text-xl sm:text-3xl font-bold text-primary-600 mt-2 break-all">
- <PriceText amount={products.length ? products.reduce((sum, p) => sum + p.price, 0) / products.length : 0} />
+ <div className="bg-[#2f2f2f] rounded-xl p-3 sm:p-4 border border-[#2f2f2f] hover:bg-[#353535] transition-shadow min-w-0">
+ <div className="flex items-center justify-between gap-2">
+ <div className="min-w-0">
+ <p className="text-[11px] font-medium text-[#b4b4b4] uppercase tracking-wide">Avg. Price</p>
+ <p className="text-sm sm:text-base font-bold text-primary-500 mt-1 whitespace-nowrap tabular-nums leading-tight">
+ <PriceText amount={pricedProducts.length ? pricedProducts.reduce((sum, p) => sum + p.price, 0) / pricedProducts.length : 0} />
  </p>
- <p className="text-xs text-[#8e8e8e] mt-1">Per product</p>
+ <p className="text-[11px] text-[#8e8e8e] mt-1">Per product</p>
  </div>
- <div className="p-2 sm:p-3 bg-[#171717] rounded-lg hidden sm:block">
- <TrendingUp className="w-8 h-8 text-primary-600" />
+ <div className="p-2 bg-[#171717] rounded-lg hidden xl:block shrink-0">
+ <TrendingUp className="w-5 h-5 text-primary-500" />
  </div>
  </div>
  </div>
@@ -767,6 +1165,17 @@ export default function VendorDashboard() {
  <BarChart3 className="w-4 h-4 inline mr-2" />
  Analytics
  </button>
+ <button
+ onClick={() => setActiveTab('bisonbook')}
+ className={`px-4 sm:px-6 py-3 sm:py-4 text-sm font-medium border-b-2 transition-colors whitespace-nowrap ${
+ activeTab === 'bisonbook'
+ ? 'border-primary-600 text-primary-600'
+ : 'border-transparent text-[#8e8e8e] hover:text-[#b4b4b4] hover:border-[#3d3d3d]'
+ }`}
+ >
+ <BookOpen className="w-4 h-4 inline mr-2" />
+ BisonBook
+ </button>
  </nav>
  </div>
 
@@ -774,6 +1183,13 @@ export default function VendorDashboard() {
  {/* Products Tab */}
  {activeTab === 'products' && (
  <div className="space-y-6">
+ {listingLocked ? (
+ <div className="rounded-lg border border-red-700/50 bg-[#171717] px-4 py-3 text-sm text-red-300">
+ {status === 'revoked'
+  ? 'Verification was revoked. These products are hidden from buyers until ProcureX approves this account again.'
+  : 'Listings stay hidden from buyers until this account is verified.'}
+ </div>
+ ) : null}
  {/* Search and Filters */}
  <div className="flex flex-col gap-3 sm:flex-row sm:gap-4 sm:items-center sm:justify-between">
  <div className="flex-1 w-full sm:max-w-md">
@@ -796,6 +1212,8 @@ export default function VendorDashboard() {
  >
  {viewMode === 'grid' ? <List className="w-4 h-4" /> : <Grid3x3 className="w-4 h-4" />}
  </Button>
+ {listingLocked ? null : (
+ <>
  <Button variant="outline" size="sm" onClick={openSearchProductModal}>
  <Search className="w-4 h-4 mr-2" />
  Add Existing
@@ -804,6 +1222,8 @@ export default function VendorDashboard() {
  <Plus className="w-4 h-4 mr-2" />
  New Product
  </Button>
+ </>
+ )}
  </div>
  </div>
 
@@ -814,8 +1234,14 @@ export default function VendorDashboard() {
  <>
  <Package className="w-16 h-16 text-gray-400 mx-auto mb-4" />
  <h3 className="text-lg font-semibold text-[#ececec] mb-2">No products yet</h3>
- <p className="text-[#b4b4b4] mb-6">Start by adding your first product to the catalog</p>
+ <p className="text-[#b4b4b4] mb-6">{listingLocked ? 'Verification is required before you can add products.' : 'Start by adding your first product to the catalog'}</p>
  <div className="flex flex-col sm:flex-row justify-center gap-3">
+ {listingLocked ? (
+ <Button variant="outline" onClick={() => setActiveTab('info')}>
+ Fix verification
+ </Button>
+ ) : (
+ <>
  <Button variant="outline" onClick={openSearchProductModal}>
  <Search className="w-4 h-4 mr-2" />
  Add Existing Product
@@ -824,6 +1250,8 @@ export default function VendorDashboard() {
  <Plus className="w-4 h-4 mr-2" />
  Create New Product
  </Button>
+ </>
+ )}
  </div>
  </>
  ) : (
@@ -881,11 +1309,11 @@ export default function VendorDashboard() {
  <Trash2 className="w-4 h-4" />
  </button>
  </div>
- {vp.stock_quantity === 0 && (
- <div className="absolute top-3 left-3">
- <Badge variant="warning">Out of Stock</Badge>
+ <div className="absolute top-3 left-3 flex flex-col gap-1">
+ {vp.stock_quantity === 0 ? <Badge variant="warning">Out of Stock</Badge> : null}
+ {String(vp.admin_assessment || '') === 'flagged' ? <Badge variant="warning">Needs changes</Badge> : null}
+ {String(vp.admin_assessment || '') === 'hidden' || vp.is_active === false ? <Badge variant="danger">Hidden</Badge> : null}
  </div>
- )}
  </div>
 
  {/* Product Info */}
@@ -918,12 +1346,17 @@ export default function VendorDashboard() {
  </p>
  )}
 
+ {vp.admin_assessment_notes ? (
+ <p className="text-sm text-amber-300 mb-4">{vp.admin_assessment_notes}</p>
+ ) : null}
+
  <div className="flex items-center justify-between pt-4 border-t border-[#2f2f2f]">
  <div>
  <p className="text-xs text-[#8e8e8e] mb-1">Price</p>
- <p className="text-2xl font-bold text-[#ececec]">
- <PriceText amount={vp.price} />
+ <p className={`${isContactPriced(vp) ? 'text-base' : 'text-2xl'} font-bold text-[#ececec]`}>
+ <PriceText amount={vp.price} contact={isContactPriced(vp)} />
  </p>
+ <p className="text-[11px] text-[#8e8e8e] mt-0.5">{availabilityLabel(vp.product?.category, vp.delivery_mode, vendor?.country)}</p>
  </div>
  <div>
  <p className="text-xs text-[#8e8e8e] mb-1">Stock</p>
@@ -932,7 +1365,7 @@ export default function VendorDashboard() {
  min="0"
  defaultValue={vp.stock_quantity}
  onBlur={(e) => handleUpdateStock(vp.id, parseInt(e.target.value) || 0)}
- className="w-20 px-2 py-1 text-center border border-[#3d3d3d] rounded-lg focus:outline-none focus:ring-2 focus:ring-primary-500 text-sm font-medium"
+ className={`w-20 px-2 py-1 text-center ${STOCK_INPUT_CLASS}`}
  />
  </div>
  </div>
@@ -1007,9 +1440,10 @@ export default function VendorDashboard() {
  <div className="flex items-center gap-6">
  <div>
  <p className="text-xs text-[#8e8e8e] mb-1">Price</p>
- <p className="text-xl font-bold text-[#ececec]">
- <PriceText amount={vp.price} />
+ <p className={`${isContactPriced(vp) ? 'text-base' : 'text-xl'} font-bold text-[#ececec]`}>
+ <PriceText amount={vp.price} contact={isContactPriced(vp)} />
  </p>
+ <p className="text-[11px] text-[#8e8e8e] mt-0.5">{availabilityLabel(vp.product?.category, vp.delivery_mode, vendor?.country)}</p>
  </div>
  <div>
  <p className="text-xs text-[#8e8e8e] mb-1">Stock Quantity</p>
@@ -1018,7 +1452,7 @@ export default function VendorDashboard() {
  min="0"
  defaultValue={vp.stock_quantity}
  onBlur={(e) => handleUpdateStock(vp.id, parseInt(e.target.value) || 0)}
- className="w-24 px-3 py-2 border border-[#3d3d3d] rounded-lg focus:outline-none focus:ring-2 focus:ring-primary-500"
+ className={`w-24 px-3 py-2 text-center ${STOCK_INPUT_CLASS}`}
  />
  </div>
  <Badge variant={vp.stock_quantity > 0 ? 'success' : 'warning'}>
@@ -1044,15 +1478,7 @@ export default function VendorDashboard() {
  variant="outline"
  onClick={() => {
  setIsEditingVendor(!isEditingVendor)
- if (!isEditingVendor) {
- setVendorFormData({
- companyName: vendor.company_name || '',
- businessRegistrationNumber: vendor.business_registration_number || '',
- domain: vendor.domain || '',
- phone: vendor.phone || '',
- address: vendor.address || '',
- })
- }
+ if (!isEditingVendor) hydrateVendorForm(vendor)
  }}
  >
  {isEditingVendor ? (
@@ -1086,11 +1512,12 @@ export default function VendorDashboard() {
  error={vendorErrors.companyName}
  />
  <Input
- label="Business Registration Number"
+ label="CAC / registration number"
  name="businessRegistrationNumber"
  type="text"
  value={vendorFormData.businessRegistrationNumber}
  onChange={(e) => setVendorFormData({ ...vendorFormData, businessRegistrationNumber: e.target.value })}
+ error={vendorErrors.businessRegistrationNumber}
  />
  <Input
  label="Domain/Website"
@@ -1106,6 +1533,35 @@ export default function VendorDashboard() {
  type="tel"
  value={vendorFormData.phone}
  onChange={(e) => setVendorFormData({ ...vendorFormData, phone: e.target.value })}
+ error={vendorErrors.phone}
+ />
+ <Input
+ label="Authorized officer"
+ name="personalName"
+ type="text"
+ value={vendorFormData.personalName}
+ onChange={(e) => setVendorFormData({ ...vendorFormData, personalName: e.target.value })}
+ error={vendorErrors.personalName}
+ />
+ <div>
+ <label className="block text-sm font-medium text-[#b4b4b4] mb-1">Government ID type</label>
+ <select
+ value={vendorFormData.idType}
+ onChange={(e) => setVendorFormData({ ...vendorFormData, idType: e.target.value })}
+ className="w-full px-4 py-2 border border-[#3d3d3d] rounded-lg bg-[#2f2f2f] text-[#ececec]"
+ >
+ {VENDOR_ID_TYPES.map((type) => (
+ <option key={type} value={type}>{type}</option>
+ ))}
+ </select>
+ </div>
+ <Input
+ label="ID number"
+ name="idNumber"
+ type="text"
+ value={vendorFormData.idNumber}
+ onChange={(e) => setVendorFormData({ ...vendorFormData, idNumber: e.target.value })}
+ error={vendorErrors.idNumber}
  />
  <div>
  <label className="block text-sm font-medium text-[#b4b4b4] mb-1">
@@ -1119,7 +1575,18 @@ export default function VendorDashboard() {
  rows={4}
  placeholder="Company address"
  />
+ {vendorErrors.address ? <p className="mt-1 text-sm text-red-400">{vendorErrors.address}</p> : null}
  </div>
+ <label className="flex items-start gap-2 text-sm text-[#b4b4b4]">
+ <input
+ type="checkbox"
+ checked={vendorFormData.termsAccepted}
+ onChange={(e) => setVendorFormData({ ...vendorFormData, termsAccepted: e.target.checked })}
+ className="mt-1"
+ />
+ <span>I confirm these business details are true and I am authorized to sell on ProcureX.</span>
+ </label>
+ {vendorErrors.termsAccepted ? <p className="text-sm text-red-400">{vendorErrors.termsAccepted}</p> : null}
  <div className="flex justify-end space-x-3 pt-4">
  <Button variant="outline" onClick={() => setIsEditingVendor(false)}>
  Cancel
@@ -1138,10 +1605,12 @@ export default function VendorDashboard() {
  </div>
  <div className="bg-[#212121] rounded-lg p-6">
  <p className="text-sm font-medium text-[#8e8e8e] mb-2">Verification Status</p>
- <Badge variant={(verificationColors[vendor.verification_status] || 'default') as 'success' | 'warning' | 'danger' | 'default'} className="text-sm">
- {vendor.verification_status === 'verified' && <CheckCircle className="w-4 h-4 mr-1 inline" />}
- {vendor.verification_status === 'pending' && <AlertCircle className="w-4 h-4 mr-1 inline" />}
- {vendor.verification_status || 'Not Verified'}
+ <Badge variant={(verificationColors[status] || 'default') as 'success' | 'warning' | 'danger' | 'default'} className="text-sm">
+ {status === 'verified' && <CheckCircle className="w-4 h-4 mr-1 inline" />}
+ {status === 'pending' && <AlertCircle className="w-4 h-4 mr-1 inline" />}
+ {status === 'rejected' && <ShieldX className="w-4 h-4 mr-1 inline" />}
+ {status === 'revoked' && <ShieldX className="w-4 h-4 mr-1 inline" />}
+ {statusLabel}
  </Badge>
  </div>
  {vendor.domain && (
@@ -1172,7 +1641,56 @@ export default function VendorDashboard() {
  )}
  </div>
  )}
+ <div className="bg-[#212121] rounded-lg p-6 space-y-4">
+ <h3 className="text-lg font-semibold text-[#ececec]">Verification documents</h3>
+ <p className="text-sm text-[#b4b4b4]">PDF, JPG, or PNG up to 8MB. Replacing a document sends the account back to review.</p>
+ {[
+ { key: 'id_document' as const, label: 'Government ID', url: vendor.id_document_url },
+ { key: 'company_certificate' as const, label: 'CAC / company certificate', url: vendor.company_certificate_url },
+ { key: 'address_bill' as const, label: 'Proof of business address', url: vendor.address_verification_bill_url },
+ ].map((doc) => (
+ <div key={doc.key} className="flex flex-col sm:flex-row sm:items-center gap-3 justify-between border border-[#3d3d3d] rounded-lg p-3">
+ <div>
+ <p className="text-sm font-medium text-[#ececec]">{doc.label}</p>
+ <p className="text-xs text-[#8e8e8e]">{doc.url ? 'Uploaded' : 'Required'}</p>
  </div>
+ <label className="inline-flex items-center gap-2 text-sm text-primary-400 cursor-pointer">
+ <Upload className="w-4 h-4" />
+ {uploadingDoc === doc.key ? 'Uploading...' : 'Upload'}
+ <input
+ type="file"
+ accept=".pdf,.jpg,.jpeg,.png,.webp"
+ className="hidden"
+ disabled={Boolean(uploadingDoc)}
+ onChange={(event) => {
+ const file = event.target.files?.[0]
+ event.target.value = ''
+ void handleUploadVerificationDoc(doc.key, file)
+ }}
+ />
+ </label>
+ </div>
+ ))}
+ <Button
+ type="button"
+ onClick={() => void handleSubmitForReview()}
+ isLoading={submittingReview}
+ disabled={Boolean(vendor.missing_requirements?.length) || vendor.submitted || vendorCanList(vendor)}
+ >
+ {vendorCanList(vendor) ? 'Verified' : vendor.submitted ? 'Waiting for review' : blocked ? 'Resubmit for review' : 'Submit for review'}
+ </Button>
+ </div>
+ </div>
+ )}
+
+ {activeTab === 'bisonbook' && (
+ <BisonBookShell
+ vendor={vendor}
+ onVendorChange={(next) => {
+ vendorRef.current = next
+ setVendor(next)
+ }}
+ />
  )}
 
  {/* Analytics Tab */}
@@ -1214,31 +1732,36 @@ export default function VendorDashboard() {
  </div>
  </div>
 
- <div className="bg-sky-50 rounded-2xl p-6 border border-sky-200">
+ <div className="bg-[#171717] rounded-xl p-6 border border-primary-200">
  <div className="flex items-center justify-between mb-4">
  <h3 className="text-lg font-semibold text-[#ececec]">Price Range</h3>
- <DollarSign className="w-6 h-6 text-blue-600" />
+ <DollarSign className="w-6 h-6 text-blue-400" />
  </div>
- {products.length > 0 ? (
+ {pricedProducts.length > 0 ? (
  <div className="space-y-2">
  <div className="flex justify-between">
  <span className="text-sm text-[#b4b4b4]">Lowest</span>
  <span className="font-semibold text-[#ececec]">
- <PriceText amount={Math.min(...products.map(p => p.price))} />
+ <PriceText amount={Math.min(...pricedProducts.map(p => p.price))} />
  </span>
  </div>
  <div className="flex justify-between">
  <span className="text-sm text-[#b4b4b4]">Average</span>
  <span className="font-semibold text-[#ececec]">
- <PriceText amount={products.reduce((sum, p) => sum + p.price, 0) / products.length} />
+ <PriceText amount={pricedProducts.reduce((sum, p) => sum + p.price, 0) / pricedProducts.length} />
  </span>
  </div>
  <div className="flex justify-between">
  <span className="text-sm text-[#b4b4b4]">Highest</span>
  <span className="font-semibold text-[#ececec]">
- <PriceText amount={Math.max(...products.map(p => p.price))} />
+ <PriceText amount={Math.max(...pricedProducts.map(p => p.price))} />
  </span>
  </div>
+ {pricedProducts.length < products.length ? (
+ <p className="text-xs text-[#8e8e8e] pt-1">
+ {products.length - pricedProducts.length} contact-for-price listing{products.length - pricedProducts.length === 1 ? '' : 's'} not included
+ </p>
+ ) : null}
  </div>
  ) : (
  <p className="text-[#b4b4b4]">No products to analyze</p>
@@ -1249,21 +1772,21 @@ export default function VendorDashboard() {
  <div className="bg-[#2f2f2f] rounded-xl border border-[#2f2f2f] p-6">
  <h3 className="text-lg font-semibold text-[#ececec] mb-4">Quick Actions</h3>
  <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
- <Button variant="outline" className="justify-start h-auto py-4">
+ <Button type="button" variant="outline" className="justify-start h-auto py-4" onClick={handleExportProducts}>
  <Download className="w-5 h-5 mr-3" />
  <div className="text-left">
  <div className="font-semibold">Export Products</div>
  <div className="text-xs text-[#8e8e8e]">Download CSV</div>
  </div>
  </Button>
- <Button variant="outline" className="justify-start h-auto py-4">
+ <Button type="button" variant="outline" className="justify-start h-auto py-4" onClick={handleShareCatalog}>
  <Share2 className="w-5 h-5 mr-3" />
  <div className="text-left">
  <div className="font-semibold">Share Catalog</div>
  <div className="text-xs text-[#8e8e8e]">Generate link</div>
  </div>
  </Button>
- <Button variant="outline" className="justify-start h-auto py-4">
+ <Button type="button" variant="outline" className="justify-start h-auto py-4" onClick={handleViewReports}>
  <FileText className="w-5 h-5 mr-3" />
  <div className="text-left">
  <div className="font-semibold">View Reports</div>
@@ -1307,7 +1830,7 @@ export default function VendorDashboard() {
  Save Changes
  </Button>
  ) : productFormMode === 'create' ? (
- <Button onClick={handleCreateProduct} isLoading={isCreatingProduct}>
+ <Button onClick={handleCreateProduct} isLoading={isCreatingProduct} disabled={!newProduct.category}>
  <Plus className="w-4 h-4 mr-2" />
  Create Product
  </Button>
@@ -1322,6 +1845,20 @@ export default function VendorDashboard() {
  <p className="text-lg font-semibold text-[#ececec]">{editingProduct.product?.name}</p>
  <p className="text-sm text-[#b4b4b4]">SKU: {editingProduct.product?.sku}</p>
  </div>
+ {allowsContactForPrice(editingProduct.product?.category || '') ? (
+ <PricingModeToggle
+ category={editingProduct.product?.category || ''}
+ value={effectivePriceMode(editingProduct.product?.category || '', editingProduct.price_mode)}
+ onChange={(mode) => setEditingProduct({ ...editingProduct, price_mode: mode })}
+ />
+ ) : null}
+ {editingProduct.product?.category === 'Service' ? (
+ <DeliveryModeToggle
+ value={editingProduct.delivery_mode || 'onsite'}
+ vendorCountry={vendor?.country}
+ onChange={(mode) => setEditingProduct({ ...editingProduct, delivery_mode: mode })}
+ />
+ ) : null}
  <div className="grid grid-cols-2 gap-4">
  <Input
  label="Stock Quantity"
@@ -1332,6 +1869,9 @@ export default function VendorDashboard() {
  setEditingProduct({ ...editingProduct, stock_quantity: parseInt(e.target.value) || 0 })
  }
  />
+ {effectivePriceMode(editingProduct.product?.category || '', editingProduct.price_mode) === 'contact' ? (
+ <ContactPriceNote />
+ ) : (
  <Input
  label={`Price (${currencyCode})`}
  type="number"
@@ -1343,38 +1883,21 @@ export default function VendorDashboard() {
  }
  helperText={`Buyers see this in ${currencyCode}`}
  />
+ )}
  </div>
  </div>
  ) : productFormMode === 'create' ? (
  <div className="space-y-6">
  <div className="bg-[#171717] border border-[#3d3d3d] rounded-lg p-4">
  <div className="flex items-start">
- <Info className="w-5 h-5 text-primary-500 mr-2 mt-0.5" />
+ <Sparkles className="w-5 h-5 text-primary-500 mr-2 mt-0.5" />
  <div className="text-sm text-[#b4b4b4]">
- <p className="font-semibold mb-1 text-[#ececec]">Create a new product</p>
- <p>Choose a category to fill the right specs, then upload a clear photo of this exact product.</p>
+ <p className="font-semibold mb-1 text-[#ececec]">Category first</p>
+ <p>Choose goods, software, or a service. That decision unlocks the right fields, AI description, and image rules.</p>
  </div>
  </div>
  </div>
 
- <Input
- label="Product Name"
- type="text"
- required
- value={newProduct.name}
- onChange={(e) => setNewProduct({ ...newProduct, name: e.target.value })}
- placeholder="e.g., Dell XPS 15 Laptop"
- />
- <div className="grid grid-cols-2 gap-4">
- <Input
- label="SKU"
- type="text"
- required
- value={newProduct.sku}
- onChange={(e) => setNewProduct({ ...newProduct, sku: e.target.value.toUpperCase() })}
- placeholder="e.g., DELL-XPS15-001"
- helperText="Unique product identifier"
- />
  <div>
  <label className="block text-sm font-medium text-[#b4b4b4] mb-1">
  Category <span className="text-red-500">*</span>
@@ -1382,24 +1905,115 @@ export default function VendorDashboard() {
  <select
  required
  value={newProduct.category}
- onChange={(e) =>
- setNewProduct({
- ...newProduct,
+ onChange={(e) => {
+ setProductAssist(null)
+ setDescriptionTouched(false)
+ setNewProduct((prev) => ({
+ ...prev,
  category: e.target.value,
  specifications: {},
- })
- }
+ description: '',
+ }))
+ }}
  className="w-full px-4 py-2 border border-[#3d3d3d] rounded-lg bg-[#2f2f2f] text-[#ececec] focus:outline-none focus:ring-2 focus:ring-primary-500"
  >
  <option value="">Select a category</option>
- {PRODUCT_CATEGORIES.map((category) => (
+ <optgroup label="Physical goods">
+ {GOODS_CATEGORIES.map((category) => (
  <option key={category} value={category}>
  {category}
  </option>
  ))}
+ </optgroup>
+ <optgroup label="Software & services">
+ {PRODUCT_CATEGORIES.filter((category) => isDigitalCategory(category)).map((category) => (
+ <option key={category} value={category}>
+ {category}
+ </option>
+ ))}
+ </optgroup>
  </select>
+ {newProduct.category ? (
+ <p className="mt-2 text-xs text-[#8e8e8e]">
+ {listingKind(newProduct.category) === 'goods'
+ ? 'Physical goods — a real photo of this product is required.'
+ : listingKind(newProduct.category) === 'software'
+ ? 'Software — a logo, app icon, or screenshot is accepted.'
+ : 'Service — a logo, mockup, or portfolio image is accepted.'}
+ </p>
+ ) : (
+ <p className="mt-2 text-xs text-[#8e8e8e]">The rest of the form appears after you pick a category.</p>
+ )}
+ </div>
+
+ {!newProduct.category ? null : (
+ <>
+ <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+ <Input
+ label={
+ listingKind(newProduct.category) === 'service'
+ ? 'Service name'
+ : listingKind(newProduct.category) === 'software'
+ ? 'Software name'
+ : 'Product name'
+ }
+ type="text"
+ required
+ value={newProduct.name}
+ onChange={(e) => setNewProduct((prev) => ({ ...prev, name: e.target.value }))}
+ placeholder={
+ isDigitalCategory(newProduct.category)
+ ? newProduct.category === 'Service'
+ ? 'e.g., Company website build'
+ : 'e.g., Inventory Manager Cloud'
+ : 'e.g., Dell XPS 15 Laptop'
+ }
+ />
+ <div>
+ <label className="block text-sm font-medium text-[#b4b4b4] mb-1">SKU</label>
+ <div className="w-full px-4 py-2 border border-[#3d3d3d] rounded-lg bg-[#171717] text-[#ececec] font-mono text-sm truncate">
+ {generateProductSku(newProduct.name, newProduct.category) || 'Generated from name'}
+ </div>
+ <p className="mt-1 text-sm text-[#8e8e8e]">Assigned automatically</p>
  </div>
  </div>
+
+ {(assistLoading || productAssist) && (
+ <div className="rounded-lg border border-[#3d3d3d] bg-[#171717] p-4 space-y-2">
+ <div className="flex items-center justify-between gap-2">
+ <p className="text-sm font-medium text-[#ececec] flex items-center gap-2">
+ <Sparkles className="w-4 h-4 text-primary-400" />
+ {assistLoading ? 'Identifying this listing…' : productAssist?.kind_label}
+ </p>
+ {productAssist?.kind ? (
+ <Badge variant="default">{productAssist.kind_label}</Badge>
+ ) : null}
+ </div>
+ {productAssist?.note ? (
+ <p className="text-xs text-amber-300">{productAssist.note}</p>
+ ) : null}
+ {productAssist?.category_mismatch && productAssist.suggested_category ? (
+ <button
+ type="button"
+ className="text-xs text-primary-400 hover:text-primary-300"
+ onClick={() => {
+ setDescriptionTouched(false)
+ setNewProduct((prev) => ({
+ ...prev,
+ category: productAssist.suggested_category || prev.category,
+ specifications: {},
+ description: '',
+ }))
+ }}
+ >
+ Use suggested category: {productAssist.suggested_category}
+ </button>
+ ) : null}
+ {productAssist?.image_rule ? (
+ <p className="text-xs text-[#8e8e8e]">{productAssist.image_rule}</p>
+ ) : null}
+ </div>
+ )}
 
  {specFieldsFor(newProduct.category).length > 0 && (
  <div className="grid grid-cols-2 gap-4">
@@ -1425,17 +2039,50 @@ export default function VendorDashboard() {
  </div>
  )}
 
+ <div>
+ <div className="flex items-center justify-between mb-1">
+ <label className="block text-sm font-medium text-[#b4b4b4]">
+ Description
+ </label>
+ {productAssist?.description ? (
+ <button
+ type="button"
+ className="text-xs text-primary-400 hover:text-primary-300"
+ onClick={() => {
+ setNewProduct((prev) => ({ ...prev, description: productAssist.description }))
+ setDescriptionTouched(true)
+ }}
+ >
+ Use AI description
+ </button>
+ ) : null}
+ </div>
  <Input
- label="Description"
  type="textarea"
  className="min-h-[100px]"
  value={newProduct.description}
- onChange={(e) => setNewProduct({ ...newProduct, description: e.target.value })}
- placeholder="Extra details buyers should know..."
+ onChange={(e) => {
+ setDescriptionTouched(true)
+ setNewProduct({ ...newProduct, description: e.target.value })
+ }}
+ placeholder={
+ isDigitalCategory(newProduct.category)
+ ? newProduct.category === 'Service'
+ ? 'Describe the work, who it is for, and what problem it solves...'
+ : 'Describe the problem this software solves and who it is for...'
+ : 'Extra details buyers should know...'
+ }
  />
+ </div>
  <div className="grid grid-cols-2 gap-4">
  <Input
- label="Stock Quantity"
+ label={
+ isDigitalCategory(newProduct.category)
+ ? newProduct.category === 'Service'
+ ? 'Available slots'
+ : 'Licenses available'
+ : 'Stock Quantity'
+ }
  type="number"
  min="0"
  value={newProduct.stock_quantity}
@@ -1443,6 +2090,9 @@ export default function VendorDashboard() {
  setNewProduct({ ...newProduct, stock_quantity: parseInt(e.target.value) || 0 })
  }
  />
+ {effectivePriceMode(newProduct.category, newProduct.price_mode) === 'contact' ? (
+ <ContactPriceNote />
+ ) : (
  <Input
  label={`Price (${currencyCode})`}
  type="number"
@@ -1455,13 +2105,31 @@ export default function VendorDashboard() {
  }
  helperText={newProduct.price > 0 ? `Listed in ${currencyCode}` : ''}
  />
+ )}
  </div>
+ {allowsContactForPrice(newProduct.category) ? (
+ <PricingModeToggle
+ category={newProduct.category}
+ value={effectivePriceMode(newProduct.category, newProduct.price_mode)}
+ onChange={(mode) => setNewProduct({ ...newProduct, price_mode: mode })}
+ />
+ ) : null}
+ {newProduct.category === 'Service' ? (
+ <DeliveryModeToggle
+ value={newProduct.delivery_mode}
+ vendorCountry={vendor?.country}
+ onChange={(mode) => setNewProduct({ ...newProduct, delivery_mode: mode })}
+ />
+ ) : null}
  <div>
  <label className="block text-sm font-medium text-[#b4b4b4] mb-2">
- Product photos <span className="text-red-500">*</span>
+ {isDigitalCategory(newProduct.category) ? 'Cover image' : 'Product photos'}
+ {!isDigitalCategory(newProduct.category) ? <span className="text-red-500"> *</span> : null}
  </label>
  <p className="text-xs text-[#8e8e8e] mb-3">
- Upload 1–{MAX_PRODUCT_IMAGES} sharp photos of this product (JPG, PNG, or WebP, at least 400px). Show the actual item from different angles. Screenshots and unrelated pictures will be rejected.
+ {isDigitalCategory(newProduct.category)
+ ? `Optional. Upload a screenshot, logo, or portfolio image (JPG, PNG, or WebP).`
+ : `Upload 1–${MAX_PRODUCT_IMAGES} sharp photos of this product (JPG, PNG, or WebP, at least 400px). Show the actual item. Logos, screenshots, and unrelated pictures will be rejected.`}
  </p>
  <input
  ref={fileInputRef}
@@ -1505,7 +2173,7 @@ export default function VendorDashboard() {
  className="flex flex-col items-center justify-center h-28 rounded-lg border-2 border-dashed border-[#3d3d3d] bg-[#171717] text-[#b4b4b4] hover:border-primary-500 hover:text-[#ececec] transition-colors"
  >
  <Upload className="w-6 h-6 mb-1" />
- <span className="text-xs">{productImageFiles.length ? 'Add more' : 'Upload photos'}</span>
+ <span className="text-xs">{productImageFiles.length ? 'Add more' : isDigitalCategory(newProduct.category) ? 'Upload image' : 'Upload photos'}</span>
  </button>
  )}
  </div>
@@ -1513,6 +2181,8 @@ export default function VendorDashboard() {
  {productImageFiles.length}/{MAX_PRODUCT_IMAGES} photos
  </p>
  </div>
+ </>
+ )}
  </div>
  ) : (
  <div className="space-y-6">
@@ -1563,6 +2233,8 @@ export default function VendorDashboard() {
  ...newProduct,
  stock_quantity: 0,
  price: product.price ? product.price / 100 : 0,
+ price_mode: 'fixed',
+ delivery_mode: '',
  })
  setProductSearch(product.name)
  }}
@@ -1574,11 +2246,11 @@ export default function VendorDashboard() {
  >
  <p className="font-medium text-[#ececec]">{product.name}</p>
  <p className="text-sm text-[#b4b4b4]">{product.category} • SKU: {product.sku}</p>
- {product.price && (
+ {(product.price || isContactPriced(product)) ? (
  <p className="text-sm font-medium text-primary-600 mt-1">
- <PriceText amount={product.price} />
+ <PriceText amount={product.price} contact={isContactPriced(product)} />
  </p>
- )}
+ ) : null}
  </div>
  ))}
  </div>
@@ -1596,6 +2268,9 @@ export default function VendorDashboard() {
  setNewProduct({ ...newProduct, stock_quantity: parseInt(e.target.value) || 0 })
  }
  />
+ {effectivePriceMode(selectedSearchCategory, newProduct.price_mode) === 'contact' ? (
+ <ContactPriceNote />
+ ) : (
  <Input
  label={`Your Price (${currencyCode}) *`}
  type="number"
@@ -1608,7 +2283,22 @@ export default function VendorDashboard() {
  }
  helperText={newProduct.price > 0 ? `Listed in ${currencyCode}` : ''}
  />
+ )}
  </div>
+ {allowsContactForPrice(selectedSearchCategory) ? (
+ <PricingModeToggle
+ category={selectedSearchCategory}
+ value={effectivePriceMode(selectedSearchCategory, newProduct.price_mode)}
+ onChange={(mode) => setNewProduct({ ...newProduct, price_mode: mode })}
+ />
+ ) : null}
+ {selectedSearchCategory === 'Service' ? (
+ <DeliveryModeToggle
+ value={newProduct.delivery_mode}
+ vendorCountry={vendor?.country}
+ onChange={(mode) => setNewProduct({ ...newProduct, delivery_mode: mode })}
+ />
+ ) : null}
  <Button 
  onClick={() => {
  const selectedProduct = searchResults.find(p => p.name === productSearch)

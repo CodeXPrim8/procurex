@@ -1,66 +1,95 @@
 'use client'
 
-import { useRequireAuth } from '@/lib/auth'
+import { accountRoleLabel, useAuth } from '@/lib/auth'
 import { useStore } from '@/lib/store'
 import Button from '@/components/ui/Button'
+import VoiceSettings from '@/components/VoiceSettings'
+import RegionCurrencyForm from '@/components/RegionCurrencyForm'
 import { useRouter } from 'next/navigation'
+import { useEffect } from 'react'
 import { User, Mail, Shield } from 'lucide-react'
 
 export default function ProfilePage() {
- const { user } = useRequireAuth()
- const { logout } = useStore()
- const router = useRouter()
+  const { user, isAuthenticated, authReady } = useAuth()
+  const { logout } = useStore()
+  const router = useRouter()
 
- const handleLogout = async () => {
- await logout()
- router.push('/login')
- }
+  useEffect(() => {
+    if (!authReady) return
+    if (window.location.hash !== '#voice') return
+    document.getElementById('voice')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }, [authReady])
 
- if (!user) return null
+  const handleLogout = async () => {
+    await logout()
+    router.push('/login')
+  }
 
- return (
- <div className="max-w-4xl mx-auto">
- <h1 className="text-2xl sm:text-3xl font-bold text-[#ececec] mb-6 sm:mb-8">Profile</h1>
- 
- <div className="bg-[#2f2f2f] rounded-lg shadow p-4 sm:p-6 space-y-6">
- <div className="flex items-center space-x-4">
- <div className="w-16 h-16 bg-[#171717] rounded-full flex items-center justify-center">
- <User className="w-8 h-8 text-primary-600" />
- </div>
- <div>
- <h2 className="text-xl sm:text-2xl font-semibold text-[#ececec] break-words">
- {user.full_name || 'User'}
- </h2>
- <p className="text-[#b4b4b4]">{user.role}</p>
- </div>
- </div>
+  if (!authReady) return null
 
- <div className="space-y-4">
- <div className="flex items-center space-x-3">
- <Mail className="w-5 h-5 text-gray-400" />
- <div>
- <p className="text-sm text-[#8e8e8e]">Email</p>
- <p className="text-[#ececec] break-all">{user.email}</p>
- </div>
- </div>
+  return (
+    <div className="max-w-4xl mx-auto space-y-6">
+      <h1 className="text-2xl sm:text-3xl font-bold text-[#ececec]">Settings</h1>
 
- <div className="flex items-center space-x-3">
- <Shield className="w-5 h-5 text-gray-400" />
- <div>
- <p className="text-sm text-[#8e8e8e]">Role</p>
- <p className="text-[#ececec] capitalize">{user.role}</p>
- </div>
- </div>
- </div>
+      <div id="region" className="bg-[#2f2f2f] rounded-lg shadow p-4 sm:p-6">
+        <RegionCurrencyForm />
+      </div>
 
- <div className="pt-4 border-t border-[#2f2f2f]">
- <Button variant="danger" onClick={handleLogout}>
- Logout
- </Button>
- </div>
- </div>
- </div>
- )
+      <div className="bg-[#2f2f2f] rounded-lg shadow p-4 sm:p-6">
+        <VoiceSettings />
+        {!isAuthenticated && (
+          <p className="text-sm text-[#b4b4b4] mt-4">
+            Log in to keep this voice on your account across devices.{' '}
+            <button
+              type="button"
+              className="text-primary-500 hover:underline"
+              onClick={() => router.push('/login?redirect=/profile')}
+            >
+              Login
+            </button>
+          </p>
+        )}
+      </div>
+
+      {user && (
+        <div className="bg-[#2f2f2f] rounded-lg shadow p-4 sm:p-6 space-y-6">
+          <div className="flex items-center space-x-4">
+            <div className="w-16 h-16 bg-[#171717] rounded-full flex items-center justify-center">
+              <User className="w-8 h-8 text-primary-600" />
+            </div>
+            <div>
+              <h2 className="text-xl sm:text-2xl font-semibold text-[#ececec] break-words">
+                {user.full_name || 'User'}
+              </h2>
+              <p className="text-[#b4b4b4] capitalize">{accountRoleLabel(user)}</p>
+            </div>
+          </div>
+
+          <div className="space-y-4">
+            <div className="flex items-center space-x-3">
+              <Mail className="w-5 h-5 text-gray-400" />
+              <div>
+                <p className="text-sm text-[#8e8e8e]">Email</p>
+                <p className="text-[#ececec] break-all">{user.email}</p>
+              </div>
+            </div>
+
+            <div className="flex items-center space-x-3">
+              <Shield className="w-5 h-5 text-gray-400" />
+              <div>
+                <p className="text-sm text-[#8e8e8e]">Role</p>
+                <p className="text-[#ececec] capitalize">{accountRoleLabel(user)}</p>
+              </div>
+            </div>
+          </div>
+
+          <div className="pt-4 border-t border-[#3d3d3d]">
+            <Button variant="danger" onClick={handleLogout}>
+              Logout
+            </Button>
+          </div>
+        </div>
+      )}
+    </div>
+  )
 }
-
-

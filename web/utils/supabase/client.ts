@@ -49,22 +49,12 @@ function parseCookieSession(): string | null {
   }
 }
 
-function clearAuthCookies() {
-  if (typeof document === 'undefined') return
-  for (const part of document.cookie.split(';')) {
-    const name = part.split('=')[0]?.trim()
-    if (!name.startsWith('sb-') || !name.includes('auth-token')) continue
-    document.cookie = `${name}=; Max-Age=0; path=/`
-  }
-}
-
 function adoptCookieSessionIfNeeded() {
+  if (typeof window === 'undefined') return
   const key = storageKey()
-  if (key && !window.localStorage.getItem(key)) {
-    const copied = parseCookieSession()
-    if (copied) window.localStorage.setItem(key, copied)
-  }
-  clearAuthCookies()
+  if (!key || window.localStorage.getItem(key)) return
+  const fromCookie = parseCookieSession()
+  if (fromCookie) window.localStorage.setItem(key, fromCookie)
 }
 
 export function createClient() {
@@ -86,9 +76,11 @@ export function createClient() {
         autoRefreshToken: true,
         detectSessionInUrl: true,
         storage: window.localStorage,
+        storageKey: storageKey() || undefined,
         flowType: 'pkce',
       },
     })
+    void globalForSupabase.procurexLocalSupabase.auth.startAutoRefresh()
   }
 
   return globalForSupabase.procurexLocalSupabase

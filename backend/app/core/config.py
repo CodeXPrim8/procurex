@@ -59,6 +59,7 @@ class Settings(BaseSettings):
     SUPABASE_URL: Optional[str] = None
     SUPABASE_ANON_KEY: Optional[str] = None
     SUPABASE_SERVICE_ROLE_KEY: Optional[str] = None
+    SUPABASE_JWKS_URL: Optional[str] = None
     
     # CORS - Allow frontend origins
     # Can be a list or JSON string from .env
@@ -91,6 +92,29 @@ class Settings(BaseSettings):
     # Redis (for Celery)
     REDIS_URL: str = "redis://localhost:6379/0"
     
+    SUPERADMIN_EMAIL: str = "stepheniwewezinem@gmail.com"
+    ADMIN_EMAILS: str = "stepheniwewezinem@gmail.com"
+
+    @property
+    def superadmin_email(self) -> str:
+        return (self.SUPERADMIN_EMAIL or "stepheniwewezinem@gmail.com").strip().lower()
+
+    @property
+    def admin_email_list(self) -> List[str]:
+        return [self.superadmin_email]
+
+    # Tax (Nigeria defaults)
+    VAT_RATE: float = 7.5
+    WHT_RATE: float = 5.0
+    # CIT tiers by annual turnover (NGN). Adjust if FIRS thresholds change.
+    CIT_SMALL_TURNOVER: float = 25_000_000
+    CIT_MEDIUM_TURNOVER: float = 100_000_000
+    CIT_SMALL_RATE: float = 0.0
+    CIT_MEDIUM_RATE: float = 20.0
+    CIT_LARGE_RATE: float = 30.0
+    BISONBOOK_STORAGE_QUOTA_MB: int = 1024
+    SUPABASE_STORAGE_BUCKET: str = "bisonbook"
+
     # Email
     SMTP_HOST: Optional[str] = None
     SMTP_PORT: int = 587

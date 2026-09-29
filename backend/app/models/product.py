@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Text, DateTime, JSON, ForeignKey, Boolean
+from sqlalchemy import Column, Integer, String, Text, DateTime, JSON, ForeignKey, Boolean, Float
 from sqlalchemy.orm import relationship
 from datetime import datetime
 from ..core.database import Base
@@ -30,15 +30,23 @@ class VendorProduct(Base):
     vendor_id = Column(Integer, ForeignKey("vendors.id"), nullable=False)
     product_id = Column(Integer, ForeignKey("products.id"), nullable=False)
     stock_quantity = Column(Integer, default=0)
-    price = Column(Integer, nullable=False)  # Price in cents
+    price = Column(Integer, nullable=False)  # Price in cents; 0 when price_mode is "contact"
+    price_mode = Column(String, default="fixed")  # "fixed" | "contact" (software/service only)
+    delivery_mode = Column(String, nullable=True)  # services: "remote" (worldwide) | "onsite" (vendor country)
+    unit_cost = Column(Float, nullable=True)  # BisonBook default cost price (NGN)
     last_verified = Column(DateTime, default=datetime.utcnow)
     is_active = Column(Boolean, default=True)
+    admin_assessment = Column(String, default="pending")
+    admin_assessment_notes = Column(Text, nullable=True)
+    admin_assessed_at = Column(DateTime, nullable=True)
+    admin_assessed_by = Column(String, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     # Relationships
     vendor = relationship("Vendor", back_populates="vendor_products")
     product = relationship("Product", back_populates="vendor_products")
+    advice = relationship("VendorAdvice", back_populates="vendor_product")
 
 
 

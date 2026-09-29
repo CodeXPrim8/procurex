@@ -15,6 +15,8 @@ export default function ChatInterface() {
  const [isLoading, setIsLoading] = useState(false)
  const [productResults, setProductResults] = useState<any[]>([])
  const messagesEndRef = useRef<HTMLDivElement>(null)
+ const latestReplyRef = useRef<HTMLDivElement>(null)
+ const pinnedMessageCountRef = useRef(0)
  const wsRef = useRef<WebSocket | null>(null)
  
  const { currentSession, setCurrentSession, addMessage, setMessages } = useStore()
@@ -54,7 +56,15 @@ export default function ChatInterface() {
  }, [currentSession?.id])
 
  useEffect(() => {
- messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+  const messages = currentSession?.messages || []
+  if (messages.length <= pinnedMessageCountRef.current) return
+  pinnedMessageCountRef.current = messages.length
+  const last = messages[messages.length - 1]
+  if (last?.role === 'assistant') {
+    latestReplyRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    return
+  }
+  messagesEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' })
  }, [currentSession?.messages])
 
  const connectWebSocket = async (sessionId: number) => {
@@ -89,6 +99,16 @@ export default function ChatInterface() {
  if (data.product_results) {
  setProductResults(data.product_results)
  }
+ if (data.quotation) {
+ setMessages((prev) => {
+ const updated = [...prev]
+ const lastMsg = updated[updated.length - 1]
+ if (lastMsg && lastMsg.role === 'assistant') {
+ lastMsg.quotation = data.quotation
+ }
+ return updated
+ })
+ }
  } else if (data.error) {
  setIsLoading(false)
  console.error('WebSocket error:', data.error)
@@ -105,10 +125,9 @@ export default function ChatInterface() {
  }
  }
 
- const handleSend = async () => {
- if (!input.trim() || !currentSession || isLoading) return
-
- const userMessage = input.trim()
+ const handleSend = async (preset?: string) => {
+ const userMessage = (typeof preset === 'string' ? preset : input).trim()
+ if (!userMessage || !currentSession || isLoading) return
  setInput('')
  setIsLoading(true)
  setProductResults([])
@@ -179,9 +198,28 @@ export default function ChatInterface() {
  </div>
  )}
  
- {currentSession?.messages.map((message, index) => (
- <ChatMessage key={index} message={message} />
- ))}
+ {currentSession?.messages.map((message, index, all) => {
+ const isLatestAssistant =
+  message.role === 'assistant' &&
+  !all.slice(index + 1).some((item: any) => item.role === 'assistant')
+ return (
+ <div
+  key={index}
+  ref={isLatestAssistant ? latestReplyRef : undefined}
+  className={isLatestAssistant ? 'scroll-mt-3' : undefined}
+ >
+ <ChatMessage
+ message={message}
+ onFollowUp={
+ message.role === 'assistant' && index === all.length - 1
+ ? (text) => void handleSend(text)
+ : undefined
+ }
+ followUpDisabled={isLoading}
+ />
+ </div>
+ )
+ })}
  
  {isLoading && (
  <div className="flex items-center space-x-2 text-[#8e8e8e]">
@@ -193,9 +231,21 @@ export default function ChatInterface() {
  {/* Product Results */}
  {productResults.length > 0 && (
  <div className="mt-4 space-y-2">
- <h3 className="font-semibold text-[#b4b4b4]">Available Products:</h3>
+ <h3 className="font-semibold text-[#b4b4b4]">
+ {productResults.some((product) => product.match_kind === 'exact' || product.match_kind === 'close')
+ ? 'Exact matches'
+ : 'Matching products'}
+ </h3>
  {productResults.map((product) => (
- <ProductCard key={product.id} product={product} />
+ <ProductCard
+ key={product.id}
+ product={product}
+ onSelect={
+ isLoading
+ ? undefined
+ : (item) => void handleSend(`Generate a formal procurement quote for ${item.name}`)
+ }
+ />
  ))}
  </div>
  )}

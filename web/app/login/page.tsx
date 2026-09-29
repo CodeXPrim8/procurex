@@ -5,7 +5,8 @@ import { useRouter } from 'next/navigation'
 import Link from 'next/link'
 import { authAPI } from '@/lib/api'
 import { useStore } from '@/lib/store'
-import { hasVendorAccountMarkers, mapSupabaseUser, persistVendorProfile, syncVendorRole } from '@/lib/auth'
+import { mapSupabaseUser, persistVendorProfile, resolveVendorAccess, useAuth } from '@/lib/auth'
+import { getAccessToken } from '@/lib/sessionToken'
 import { showToast } from '@/lib/toast'
 import Button from '@/components/ui/Button'
 import Input from '@/components/ui/Input'
@@ -16,6 +17,7 @@ export default function LoginPage() {
  const [password, setPassword] = useState('')
  const [isLoading, setIsLoading] = useState(false)
  const router = useRouter()
+ const { isAuthenticated, authReady, user } = useAuth()
  const { setUser } = useStore()
  
  // Get redirect URL from query params
@@ -37,14 +39,36 @@ export default function LoginPage() {
  return
  }
  if (redirect.startsWith('/chat') && isVendor) {
- router.push('/vendor')
- return
+ useStore.getState().setAccountView('buyer')
+ }
+ if (redirect.startsWith('/vendor') && isVendor) {
+ useStore.getState().setAccountView('vendor')
  }
  router.push(redirect)
  return
  }
+ if (isVendor) {
+ useStore.getState().setAccountView('vendor')
+ }
  router.push(isVendor ? '/vendor' : '/chat')
  }
+
+ useEffect(() => {
+   if (!authReady || !isAuthenticated) return
+   let cancelled = false
+   void (async () => {
+     const token = await getAccessToken()
+     if (cancelled || !token) return
+     const resolved = await resolveVendorAccess(useStore.getState().user)
+     if (cancelled) return
+     useStore.getState().setHasVendorAccount(resolved.hasVendorAccount)
+     if (resolved.user) setUser(resolved.user)
+     goHome(resolved.hasVendorAccount || resolved.user?.role === 'vendor')
+   })()
+   return () => {
+     cancelled = true
+   }
+ }, [authReady, isAuthenticated, user?.id])
 
  const handleLogin = async (e: React.FormEvent) => {
  e.preventDefault()
@@ -53,7 +77,6 @@ export default function LoginPage() {
  try {
  const loginData = await authAPI.login(email, password)
  const supabaseUser = loginData.user || (await authAPI.getMe())
- const metadata = supabaseUser?.user_metadata || {}
  let user = mapSupabaseUser(supabaseUser)
  setUser(user)
 
@@ -67,8 +90,8 @@ export default function LoginPage() {
  }
  }
  const pendingForThisUser = Boolean(
- pending &&
- (!pending.email || pending.email.toLowerCase() === (user?.email || '').toLowerCase())
+ pending?.email &&
+ pending.email.toLowerCase() === (user?.email || '').toLowerCase()
  )
 
  if (pendingForThisUser) {
@@ -80,9 +103,17 @@ export default function LoginPage() {
  domain: pending.domain,
  phone: pending.phone,
  address: pending.address,
+ personal_name: pending.personal_name,
+ id_type: pending.id_type,
+ id_number: pending.id_number,
+ terms_accepted: Boolean(pending.terms_accepted),
+ charge_vat: Boolean(pending.charge_vat),
+ tin: pending.charge_vat ? pending.tin : undefined,
+ tax_clearance_expires_at: pending.charge_vat ? pending.tax_clearance_expires_at : undefined,
  })
  const vendorUser = await persistVendorProfile(pending)
  if (vendorUser) setUser(vendorUser)
+ useStore.getState().setHasVendorAccount(true)
  localStorage.removeItem('pending_vendor_registration')
  showToast('Welcome back — opening your vendor dashboard.', 'success')
  router.push('/vendor')
@@ -95,46 +126,31 @@ export default function LoginPage() {
  localStorage.removeItem('pending_vendor_registration')
  }
 
- const isVendor = hasVendorAccountMarkers(metadata)
- if (isVendor && metadata.role !== 'vendor') {
- const vendorUser = await persistVendorProfile({
- company_name: metadata.company_name,
- business_registration_number: metadata.business_registration_number,
- domain: metadata.domain,
- phone: metadata.phone,
- address: metadata.address,
- })
- if (vendorUser) {
- setUser(vendorUser)
- user = vendorUser
+ const resolved = await resolveVendorAccess(user)
+ if (resolved.user) {
+ setUser(resolved.user)
+ user = resolved.user
  }
- } else if (!isVendor) {
- const synced = await syncVendorRole(user)
- if (synced) {
- setUser(synced)
- user = synced
- }
- }
-
- const vendorAccount = (user?.role === 'vendor') || hasVendorAccountMarkers(metadata)
- showToast(vendorAccount ? 'Welcome back — opening your vendor dashboard.' : 'Login successful!', 'success')
- goHome(Boolean(vendorAccount))
+ useStore.getState().setHasVendorAccount(resolved.hasVendorAccount)
+ const isVendor = resolved.hasVendorAccount || resolved.user?.role === 'vendor' || user?.role === 'vendor'
+ showToast(isVendor ? 'Welcome back — opening your vendor dashboard.' : 'Login successful!', 'success')
+ goHome(Boolean(isVendor))
  } catch (err: any) {
  console.error('Login error:', err)
  let message = 'Login failed'
+ const status = Number(err?.status || err?.code || err?.response?.status || 0)
+ const raw = String(err?.message || err?.error_description || '')
  
- if (err?.message) {
- message = err.message
- // Common Supabase errors
- if (err.message.includes('Invalid login credentials')) {
+ if (status === 503 || status === 502 || status === 504 || /HTTP 503|upstream connect|service unavailable/i.test(raw)) {
+ message = 'Sign-in is temporarily unavailable. Wait a minute and try again, and check that your Supabase project is not paused.'
+ } else if (raw.includes('Invalid login credentials')) {
  message = 'Invalid email or password. Please try again.'
- } else if (err.message.includes('Email not confirmed')) {
+ } else if (raw.includes('Email not confirmed')) {
  message = 'Please check your email and confirm your account before signing in.'
- } else if (err.message.includes('network') || err.message.includes('fetch')) {
+ } else if (/network|fetch|Failed to fetch/i.test(raw)) {
  message = 'Network error. Please check your internet connection and try again.'
- }
- } else if (err?.error_description) {
- message = err.error_description
+ } else if (raw) {
+ message = raw
  } else if (err?.response?.data?.detail) {
  message = err.response.data.detail
  }

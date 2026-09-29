@@ -24,6 +24,28 @@ export function isCloudSessionId(id: unknown): id is string {
   return typeof id === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)
 }
 
+export function mergeChatHistory<T extends { role?: string; content?: string }>(
+  local: T[] | null | undefined,
+  remote: T[] | null | undefined
+): T[] {
+  const clean = (list: T[] | null | undefined) =>
+    (list || []).filter((item) => {
+      const text = String(item?.content || '').trim()
+      return Boolean(text) && text !== '...'
+    })
+  const loc = clean(local)
+  const rem = clean(remote)
+  const keyOf = (item: T) => `${item.role || ''}::${String(item.content || '').trim()}`
+  const locAssist = loc.filter((item) => item.role === 'assistant').length
+  const remAssist = rem.filter((item) => item.role === 'assistant').length
+  if (locAssist > remAssist || loc.length > rem.length) {
+    const seen = new Set(loc.map(keyOf))
+    return [...loc, ...rem.filter((item) => !seen.has(keyOf(item)))]
+  }
+  const seen = new Set(rem.map(keyOf))
+  return [...rem, ...loc.filter((item) => !seen.has(keyOf(item)))]
+}
+
 function isMissingTable(error: any) {
   const code = error?.code || ''
   const message = String(error?.message || '')
@@ -157,16 +179,51 @@ export async function createCloudSession(title = 'New chat', legacyId?: number |
   return mapSessionRow(data, [])
 }
 
+export async function deleteCloudSession(sessionId: string) {
+  const userId = await currentUserId()
+  if (!userId) throw new Error('Not signed in')
+  const { error: messageError } = await supabase
+    .from(MESSAGE_TABLE)
+    .delete()
+    .eq('session_id', sessionId)
+  if (messageError && !isMissingTable(messageError)) throw messageError
+  const { error } = await supabase
+    .from(SESSION_TABLE)
+    .delete()
+    .eq('id', sessionId)
+    .eq('user_id', userId)
+  if (error && !isMissingTable(error)) throw error
+}
+
 export async function saveCloudMessage(
   sessionId: string,
   role: CloudMessage['role'],
   content: string,
   title?: string
 ) {
+  const text = (content || '').trim()
+  if (!text || text === '...') return
+  const { data: last } = await supabase
+    .from(MESSAGE_TABLE)
+    .select('role, content')
+    .eq('session_id', sessionId)
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle()
+  if (last?.role === role && String(last?.content || '').trim() === text) {
+    if (title && title.trim()) {
+      const { error: titleError } = await supabase
+        .from(SESSION_TABLE)
+        .update({ title: title.trim(), updated_at: new Date().toISOString() })
+        .eq('id', sessionId)
+      if (titleError) throw titleError
+    }
+    return
+  }
   const { error } = await supabase.from(MESSAGE_TABLE).insert({
     session_id: sessionId,
     role,
-    content,
+    content: text,
   })
   if (error) throw error
   const patch: Record<string, string> = { updated_at: new Date().toISOString() }

@@ -1,0 +1,266 @@
+.stage {
+  --orb-size: min(70vw, 280px);
+  --px-energy: 0;
+  position: relative;
+  display: grid;
+  width: var(--orb-size);
+  height: var(--orb-size);
+  place-items: center;
+  pointer-events: none;
+}
+
+.audio {
+  display: grid;
+  width: 100%;
+  height: 100%;
+  place-items: center;
+  transform: scale(calc(1 + var(--px-energy) * 0.08));
+  will-change: transform;
+}
+
+.stage[data-cue='true'] .audio {
+  animation: px-orb-nod 0.72s ease;
+}
+
+.stage[data-cue='true'] .halo {
+  animation: px-orb-listen-halo 0.72s ease;
+}
+
+.halo {
+  position: absolute;
+  inset: -18%;
+  border-radius: 50%;
+  background: radial-gradient(circle, rgba(255, 255, 255, 0.16) 0%, rgba(255, 255, 255, 0.05) 34%, transparent 68%);
+  filter: blur(18px);
+  opacity: calc(0.42 + var(--px-energy) * 0.42);
+  transform: scale(calc(1 + var(--px-energy) * 0.14));
+  will-change: transform, opacity;
+}
+
+.ambient {
+  position: relative;
+  width: 100%;
+  height: 100%;
+}
+
+.orb {
+  position: relative;
+  display: block;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  border-radius: 50%;
+  background: #050505;
+  box-shadow: inset 0 0 48px 32px #000, 0 0 34px rgba(255, 255, 255, 0.035);
+  animation: px-orb-breathe 8s ease-in-out infinite;
+}
+
+.atmosphere,
+.cloud,
+.core,
+.coreBoost,
+.highlight,
+.vignette {
+  position: absolute;
+  border-radius: 50%;
+  pointer-events: none;
+}
+
+.atmosphere {
+  inset: 5%;
+  background: radial-gradient(ellipse at 45% 47%, rgba(255, 255, 255, 0.1), transparent 44%);
+  filter: blur(22px);
+  animation: px-orb-atmosphere 10s ease-in-out infinite;
+}
+
+.cloudOne {
+  width: 74%;
+  height: 52%;
+  top: 17%;
+  left: 9%;
+  background: radial-gradient(ellipse, rgba(255, 255, 255, 0.35), transparent 68%);
+  filter: blur(22px);
+  transform: rotate(16deg);
+  animation: px-orb-cloud-one 9s ease-in-out infinite;
+}
+
+.cloudTwo {
+  width: 65%;
+  height: 61%;
+  top: 19%;
+  right: 9%;
+  background: radial-gradient(ellipse, rgba(255, 255, 255, 0.22), transparent 67%);
+  filter: blur(24px);
+  animation: px-orb-cloud-two 11s ease-in-out infinite;
+}
+
+.clouds {
+  position: absolute;
+  inset: 0;
+  transform: scale(calc(1 + var(--px-energy) * 0.05));
+  will-change: transform;
+}
+
+.core {
+  width: 38%;
+  height: 34%;
+  top: 33%;
+  left: 32%;
+  background: radial-gradient(
+    circle at 62% 48%,
+    #fff 0 8%,
+    rgba(255, 255, 255, 0.92) 23%,
+    rgba(220, 220, 220, 0.63) 45%,
+    transparent 73%
+  );
+  filter: blur(6px);
+  animation: px-orb-core 6s ease-in-out infinite;
+}
+
+.coreBoost {
+  width: 42%;
+  height: 38%;
+  top: 31%;
+  left: 30%;
+  background: radial-gradient(circle, rgba(255, 255, 255, 0.85), transparent 72%);
+  filter: blur(8px);
+  opacity: calc(var(--px-energy) * 0.55);
+}
+
+.highlight {
+  width: 28%;
+  height: 24%;
+  top: 31%;
+  left: 38%;
+  background: radial-gradient(circle, rgba(255, 255, 255, 0.98), rgba(255, 255, 255, 0.2) 50%, transparent 72%);
+  filter: blur(3px);
+  animation: px-orb-highlight 6s ease-in-out infinite;
+}
+
+.vignette {
+  inset: 0;
+  box-shadow: inset 0 0 70px 45px #000;
+}
+
+@keyframes px-orb-nod {
+  0%,
+  100% {
+    transform: translateY(0) scale(calc(1 + var(--px-energy) * 0.08));
+  }
+  22% {
+    transform: translateY(11px) scale(calc(0.96 + var(--px-energy) * 0.05));
+  }
+  42% {
+    transform: translateY(2px) scale(calc(1 + var(--px-energy) * 0.07));
+  }
+  64% {
+    transform: translateY(8px) scale(calc(0.97 + var(--px-energy) * 0.05));
+  }
+}
+
+@keyframes px-orb-listen-halo {
+  0%,
+  100% {
+    opacity: calc(0.42 + var(--px-energy) * 0.42);
+    transform: scale(calc(1 + var(--px-energy) * 0.14));
+  }
+  30% {
+    opacity: 0.9;
+    transform: scale(calc(1.08 + var(--px-energy) * 0.12));
+  }
+  70% {
+    opacity: 0.7;
+    transform: scale(calc(1.04 + var(--px-energy) * 0.12));
+  }
+}
+
+@keyframes px-orb-breathe {
+  0%,
+  100% {
+    transform: scale(0.985);
+  }
+  50% {
+    transform: scale(1);
+  }
+}
+
+@keyframes px-orb-atmosphere {
+  0%,
+  100% {
+    transform: translate(-3%, 2%) scale(0.95);
+    opacity: 0.7;
+  }
+  50% {
+    transform: translate(4%, -2%) scale(1.08);
+    opacity: 1;
+  }
+}
+
+@keyframes px-orb-cloud-one {
+  0%,
+  100% {
+    transform: rotate(16deg) translate(-4%, 2%) scale(0.94);
+    opacity: 0.72;
+  }
+  50% {
+    transform: rotate(8deg) translate(7%, -4%) scale(1.08);
+    opacity: 1;
+  }
+}
+
+@keyframes px-orb-cloud-two {
+  0%,
+  100% {
+    transform: translate(4%, 0) scale(0.96);
+    opacity: 0.55;
+  }
+  50% {
+    transform: translate(-8%, 5%) scale(1.1);
+    opacity: 0.9;
+  }
+}
+
+@keyframes px-orb-core {
+  0%,
+  100% {
+    transform: translate(-2%, 2%) scale(0.92);
+    opacity: 0.74;
+  }
+  50% {
+    transform: translate(4%, -3%) scale(1.08);
+    opacity: 1;
+  }
+}
+
+@keyframes px-orb-highlight {
+  0%,
+  100% {
+    transform: translate(-3%, 2%) scale(0.9);
+    opacity: 0.7;
+  }
+  50% {
+    transform: translate(4%, -2%) scale(1.12);
+    opacity: 1;
+  }
+}
+
+@media (max-width: 560px) {
+  .stage {
+    --orb-size: min(72vw, 240px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .stage[data-cue='true'] .audio,
+  .stage[data-cue='true'] .halo {
+    animation: none;
+  }
+  .orb,
+  .atmosphere,
+  .cloudOne,
+  .cloudTwo,
+  .core,
+  .highlight {
+    animation: none;
+  }
+}

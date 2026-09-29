@@ -3,6 +3,7 @@
 import { ReactNode, useEffect, useState } from 'react'
 import { usePathname } from 'next/navigation'
 import Navbar from './Navbar'
+import RegionPrompt from './RegionPrompt'
 import { ToastContainer } from './ui/Toast'
 import { subscribe, getToasts, removeToast, Toast } from '@/lib/toast'
 
@@ -39,6 +40,7 @@ export default function Layout({ children }: LayoutProps) {
  >
  {children}
  </main>
+ {!isAuthPage && <RegionPrompt />}
  <ToastContainer
  toasts={toasts}
  onRemove={removeToast}

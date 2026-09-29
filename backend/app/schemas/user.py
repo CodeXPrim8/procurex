@@ -18,9 +18,16 @@ class UserResponse(BaseModel):
     is_active: bool
     role: UserRole
     created_at: datetime
+    country: Optional[str] = None
+    preferred_currency: Optional[str] = None
 
     class Config:
         from_attributes = True
+
+
+class UserPreferencesIn(BaseModel):
+    country: Optional[str] = None
+    preferred_currency: Optional[str] = None
 
 
 class Token(BaseModel):

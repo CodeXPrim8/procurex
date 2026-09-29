@@ -6,7 +6,11 @@ import logging
 import time
 from .core.config import settings
 from .core.database import engine, Base, migrate_sqlite_schema
-from .api import auth, products, vendors, chat, quotations, admin
+from .models.vendor import VendorAdvice  # noqa: F401  # register vendor_advice table
+from .models.buyer import BuyerMemory  # noqa: F401  # register buyer_memories table
+from .models.business import BuyerBusiness, BusinessClient, ClientRequest  # noqa: F401
+from .models import bisonbook as _bisonbook_models  # noqa: F401  # register bb_* tables
+from .api import auth, products, vendors, chat, quotations, admin, bisonbook, businesses
 
 # Configure logging
 logging.basicConfig(
@@ -36,12 +40,24 @@ if isinstance(cors_origins, str):
     except:
         cors_origins = [cors_origins]
 
+# .env often lists localhost but not 127.0.0.1; browsers treat those as different origins.
+local_dev_origins = [
+    "http://localhost:3000",
+    "http://localhost:3001",
+    "http://localhost:8081",
+    "http://127.0.0.1:3000",
+    "http://127.0.0.1:3001",
+    "http://127.0.0.1:8081",
+]
+if isinstance(cors_origins, list):
+    cors_origins = list(dict.fromkeys([*cors_origins, *local_dev_origins]))
+
 logger.info(f"CORS Origins configured: {cors_origins}")
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=cors_origins,
-    allow_origin_regex=r"https://.*\.vercel\.app",
+    allow_origin_regex=r"https://.*\.vercel\.app|https?://(localhost|127\.0\.0\.1)(:\d+)?",
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH", "HEAD"],  # Include HEAD
     allow_headers=["*"],  # Allow all headers including Authorization, Content-Type
@@ -55,7 +71,9 @@ app.include_router(products.router, prefix=settings.API_V1_PREFIX)
 app.include_router(vendors.router, prefix=settings.API_V1_PREFIX)
 app.include_router(chat.router, prefix=settings.API_V1_PREFIX)
 app.include_router(quotations.router, prefix=settings.API_V1_PREFIX)
+app.include_router(businesses.router, prefix=settings.API_V1_PREFIX)
 app.include_router(admin.router, prefix=settings.API_V1_PREFIX)
+app.include_router(bisonbook.router, prefix=settings.API_V1_PREFIX)
 
 uploads_dir = Path("uploads")
 uploads_dir.mkdir(parents=True, exist_ok=True)

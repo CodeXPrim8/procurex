@@ -2,15 +2,33 @@
 
 import { useState, type ReactNode } from 'react'
 import ReactMarkdown from 'react-markdown'
-import { User, Volume2, Copy, Share2, Check } from 'lucide-react'
+import { User, Volume2, Copy, Share2, Check, ArrowUpRight } from 'lucide-react'
 import Logo from '@/components/Logo'
+import { ChatQuoteCard } from '@/components/QuotationCard'
 
 interface ChatMessageProps {
  message: {
  role: 'user' | 'assistant' | 'system'
  content: string
+ metadata?: string
+ quotation?: any
  }
  onSpeak?: (content: string) => void
+ showActions?: boolean
+ onFollowUp?: (text: string) => void
+ followUpDisabled?: boolean
+}
+
+function quotationFromMessage(message: ChatMessageProps['message']) {
+ if (message?.quotation?.quotation_number) return message.quotation
+ const raw = message?.metadata
+ if (!raw) return null
+ try {
+  const payload = typeof raw === 'string' ? JSON.parse(raw) : raw
+  return payload?.quotation || null
+ } catch {
+  return null
+ }
 }
 
 const markdownComponents = {
@@ -36,9 +54,61 @@ const markdownComponents = {
  ),
 }
 
-export default function ChatMessage({ message, onSpeak }: ChatMessageProps) {
+const NEXT_STEP_LINE =
+ /(?:^|\n)[ \t]*(?:\*\*)?next\s*step(?:s)?(?:\*\*)?[ \t]*[:\-]?[ \t]*(?:\*\*)?[ \t]*\n?[ \t]*(.+?)[ \t]*(?:\*\*)?[ \t]*(?=\n|$)/gi
+
+function stripMarkdown(value: string) {
+ return value.replace(/\*+/g, '').replace(/^[\s•\-]+/, '').replace(/["“”]+/g, '').trim()
+}
+
+function followUpSendText(step: string) {
+ const cleaned = stripMarkdown(step).replace(/\s+/g, ' ')
+ const match = cleaned.match(
+ /^(?:shall i|should i|would you like me to|do you want me to|can i|may i)\s+(.+?)\??$/i
+ )
+ if (match?.[1]) {
+ const action = match[1].trim().replace(/\?+$/, '')
+ if (!action) return `Yes. ${cleaned}`
+ return `Yes, ${action.charAt(0).toLowerCase()}${action.slice(1)}`
+ }
+ if (/\?$/.test(cleaned)) {
+ return `Yes. ${cleaned.replace(/\?+$/, '.')}`
+ }
+ return cleaned
+}
+
+export function extractFollowUps(content: string) {
+ const steps: { label: string; send: string }[] = []
+ const seen = new Set<string>()
+ const body = (content || '').replace(NEXT_STEP_LINE, (_full, raw: string) => {
+ const label = stripMarkdown(String(raw || ''))
+ if (!label || label.length < 8) return ''
+ const send = followUpSendText(label)
+ const key = send.toLowerCase()
+ if (!seen.has(key)) {
+ seen.add(key)
+ steps.push({ label, send })
+ }
+ return ''
+ })
+ return {
+ body: body.replace(/\n{3,}/g, '\n\n').trim(),
+ steps,
+ }
+}
+
+export default function ChatMessage({
+ message,
+ onSpeak,
+ showActions = false,
+ onFollowUp,
+ followUpDisabled = false,
+}: ChatMessageProps) {
  const isUser = message.role === 'user'
  const [copied, setCopied] = useState(false)
+ const followUps = !isUser ? extractFollowUps(message.content) : { body: message.content, steps: [] }
+ const displayContent = isUser ? message.content : followUps.body
+ const quotation = !isUser ? quotationFromMessage(message) : null
 
  const copyText = async () => {
  try {
@@ -63,8 +133,8 @@ export default function ChatMessage({ message, onSpeak }: ChatMessageProps) {
  }
 
  return (
- <div className={`${isUser ? 'md:bg-[#212121]' : 'md:bg-[#2f2f2f]'} md:border-b md:border-[#2f2f2f]`}>
- <div className={`max-w-3xl mx-auto px-4 py-3 md:py-6 ${isUser ? 'flex justify-end md:block' : ''}`}>
+ <div className="group">
+ <div className={`max-w-3xl mx-auto px-4 py-2.5 md:py-5 ${isUser ? 'flex justify-end md:block' : ''}`}>
  <div className={`flex items-start ${isUser ? 'md:space-x-4 max-w-[88%] md:max-w-none' : 'space-x-0 md:space-x-4 w-full'}`}>
  <div className="flex-shrink-0 hidden md:block">
  {isUser ? (
@@ -87,11 +157,32 @@ export default function ChatMessage({ message, onSpeak }: ChatMessageProps) {
  }`}
  >
  <ReactMarkdown components={markdownComponents}>
- {message.content}
+ {displayContent}
  </ReactMarkdown>
  </div>
+ {quotation && <ChatQuoteCard quotation={quotation} />}
+ {!isUser && onFollowUp && followUps.steps.length > 0 && (
+ <div className="mt-3 flex flex-wrap gap-2">
+ {followUps.steps.map((step) => (
+ <button
+ key={step.send}
+ type="button"
+ disabled={followUpDisabled}
+ onClick={() => onFollowUp(step.send)}
+ className="max-w-full inline-flex items-center gap-2 text-left text-sm px-3.5 py-2 rounded-full border border-[#3d3d3d] bg-[#212121] text-[#ececec] hover:bg-[#2f2f2f] hover:border-[#5a5a5a] disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+ >
+ <span className="break-words">{step.label}</span>
+ <ArrowUpRight className="w-3.5 h-3.5 shrink-0 text-[#8e8e8e]" />
+ </button>
+ ))}
+ </div>
+ )}
  {!isUser && message.content && (
- <div className="mt-3 flex items-center gap-3 text-[#8e8e8e]">
+ <div
+ className={`mt-1.5 flex items-center gap-1 text-[#8e8e8e] transition-opacity ${
+ showActions ? 'opacity-100' : 'opacity-0 md:group-hover:opacity-100'
+ }`}
+ >
  <button
  type="button"
  onClick={() => void copyText()}
@@ -121,9 +212,6 @@ export default function ChatMessage({ message, onSpeak }: ChatMessageProps) {
  >
  <Share2 className="w-4 h-4" />
  </button>
- <span className="hidden md:inline-flex items-center space-x-1 text-xs ml-1">
- {onSpeak && <span>Listen</span>}
- </span>
  </div>
  )}
  </div>

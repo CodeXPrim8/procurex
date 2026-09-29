@@ -1,6 +1,7 @@
 import axios, { type InternalAxiosRequestConfig } from 'axios'
-import { getAccessToken } from './sessionToken'
+import { ensureFreshSession, getAccessToken } from './sessionToken'
 import { supabase } from './supabaseClient'
+import { debugAuthLog } from './debugAuthLog'
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
 
@@ -52,8 +53,32 @@ api.interceptors.request.use(async (config: InternalAxiosRequestConfig) => {
 // Add response interceptor for better error handling
 api.interceptors.response.use(
   (response) => response,
-  (error) => {
-    // Enhanced error handling with specific messages
+  async (error) => {
+    const original = error.config as InternalAxiosRequestConfig & { _retry?: boolean }
+    if (error.response?.status === 401 && original && !original._retry) {
+      original._retry = true
+      const token = await ensureFreshSession()
+      if (token) {
+        original.headers = original.headers || {}
+        original.headers.Authorization = `Bearer ${token}`
+        return api(original)
+      }
+    }
+    if (error.response?.status === 401) {
+      // #region agent log
+      debugAuthLog(
+        'api.ts:401',
+        'request unauthorized',
+        {
+          url: String(original?.url || '').slice(0, 160),
+          method: String(original?.method || ''),
+          retried: Boolean(original?._retry),
+        },
+        'B'
+      )
+      // #endregion
+    }
+
     if (error.code === 'ERR_NETWORK' || error.message?.includes('Network Error') || error.message?.includes('Failed to fetch')) {
       // Check if backend is reachable
       const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
@@ -129,7 +154,7 @@ api.interceptors.response.use(
     } else if (error.code === 'ETIMEDOUT' || error.message?.includes('timeout')) {
       error.userMessage = 'Request timed out. The server is taking too long to respond. Please try again.'
     } else if (error.response?.status === 401) {
-      error.userMessage = 'Authentication failed. Please log in again.'
+      error.userMessage = 'Could not verify this request. Please try again.'
     } else if (error.response?.status === 403) {
       error.userMessage = 'You do not have permission to perform this action.'
     } else if (error.response?.status === 404) {
@@ -171,6 +196,9 @@ export const authAPI = {
       domain?: string
       phone?: string
       address?: string
+      personal_name?: string
+      id_type?: string
+      id_number?: string
     }
   ) => {
     try {
@@ -231,6 +259,17 @@ export const authAPI = {
   },
 }
 
+export const accountAPI = {
+  me: async () => {
+    const response = await api.get('/auth/me')
+    return response.data as { id: number; email: string; country?: string | null; preferred_currency?: string | null }
+  },
+  updatePreferences: async (payload: { country: string; preferred_currency: string }) => {
+    const response = await api.put('/auth/me/preferences', payload)
+    return response.data as { country?: string | null; preferred_currency?: string | null }
+  },
+}
+
 // Chat API
 export const chatAPI = {
   createSession: async (title?: string) => {
@@ -248,12 +287,62 @@ export const chatAPI = {
     return response.data
   },
 
+  deleteSession: async (sessionId: number) => {
+    await api.delete(`/chat/sessions/${sessionId}`)
+  },
+
+  renameSession: async (sessionId: number, title: string) => {
+    const response = await api.patch(`/chat/sessions/${sessionId}`, { title })
+    return response.data
+  },
+
   createMessage: async (sessionId: number, content: string, role: 'user' | 'assistant' = 'user') => {
     const response = await api.post(`/chat/sessions/${sessionId}/messages`, {
       content,
       role,
     })
     return response.data
+  },
+
+  generateReply: async (
+    sessionId: number,
+    payload: {
+      message: string
+      voice?: boolean
+      currency?: string
+      currency_symbol?: string
+      local_per_ngn?: number
+      country?: string
+      business_id?: number
+      client_id?: number
+      request_id?: number
+    }
+  ) => {
+    const response = await api.post(`/chat/sessions/${sessionId}/reply`, payload, { timeout: 90000 })
+    return response.data as {
+      content: string
+      title?: string
+      product_results?: any[]
+      quotation?: any
+    }
+  },
+
+  transcribe: async (blob: Blob) => {
+    const form = new FormData()
+    const ext = blob.type.includes('mp4') ? 'm4a' : 'webm'
+    form.append('file', blob, `speech.${ext}`)
+    const response = await api.post('/chat/transcribe', form, { timeout: 45000 })
+    return String(response.data?.text || '').trim()
+  },
+
+  speak: async (text: string, voice?: string) => {
+    const response = await api.post(
+      '/chat/speak',
+      { text, voice: voice || undefined },
+      { responseType: 'arraybuffer', timeout: 20000 }
+    )
+    const mime = String(response.headers?.['content-type'] || 'audio/mpeg').split(';')[0]
+    return { data: response.data as ArrayBuffer, mime }
   },
 }
 
@@ -284,8 +373,10 @@ export const quotationAPI = {
     return response.data
   },
 
-  getQuotations: async () => {
-    const response = await api.get('/quotations')
+  getQuotations: async (businessId?: number) => {
+    const response = await api.get('/quotations', {
+      params: businessId ? { business_id: businessId } : undefined,
+    })
     return response.data
   },
 
@@ -294,16 +385,77 @@ export const quotationAPI = {
     return response.data
   },
 
-  getPDF: async (quotationId: number) => {
+  update: async (quotationId: number, payload: any) => {
+    const response = await api.patch(`/quotations/${quotationId}`, payload)
+    return response.data
+  },
+
+  getPDF: async (quotationId: number, inline = false) => {
     const response = await api.get(`/quotations/${quotationId}/pdf`, {
       responseType: 'blob',
+      params: inline ? { inline: true } : undefined,
     })
     return response.data
   },
 
-  send: async (quotationId: number) => {
-    const response = await api.post(`/quotations/${quotationId}/send`)
+  send: async (quotationId: number, payload?: { to?: string[]; cc?: string[] }) => {
+    const response = await api.post(`/quotations/${quotationId}/send`, payload || {})
     return response.data
+  },
+
+  convert: async (quotationId: number, kind: 'invoice' | 'receipt') => {
+    const response = await api.post(`/quotations/${quotationId}/convert`, { kind })
+    return response.data
+  },
+}
+
+export const businessAPI = {
+  list: async () => {
+    const response = await api.get('/businesses')
+    return response.data
+  },
+  get: async (id: number) => {
+    const response = await api.get(`/businesses/${id}`)
+    return response.data
+  },
+  create: async (payload: any) => {
+    const response = await api.post('/businesses', payload)
+    return response.data
+  },
+  update: async (id: number, payload: any) => {
+    const response = await api.patch(`/businesses/${id}`, payload)
+    return response.data
+  },
+  remove: async (id: number) => {
+    await api.delete(`/businesses/${id}`)
+  },
+  uploadBrand: async (id: number, kind: 'logo' | 'letterhead', file: File) => {
+    const form = new FormData()
+    form.append('file', file)
+    const response = await api.post(`/businesses/${id}/branding/${kind}`, form)
+    return response.data
+  },
+  createClient: async (id: number, payload: any) => {
+    const response = await api.post(`/businesses/${id}/clients`, payload)
+    return response.data
+  },
+  updateClient: async (id: number, clientId: number, payload: any) => {
+    const response = await api.patch(`/businesses/${id}/clients/${clientId}`, payload)
+    return response.data
+  },
+  removeClient: async (id: number, clientId: number) => {
+    await api.delete(`/businesses/${id}/clients/${clientId}`)
+  },
+  createRequest: async (id: number, payload: any) => {
+    const response = await api.post(`/businesses/${id}/requests`, payload)
+    return response.data
+  },
+  updateRequest: async (id: number, requestId: number, payload: any) => {
+    const response = await api.patch(`/businesses/${id}/requests/${requestId}`, payload)
+    return response.data
+  },
+  removeRequest: async (id: number, requestId: number) => {
+    await api.delete(`/businesses/${id}/requests/${requestId}`)
   },
 }
 
@@ -332,6 +484,24 @@ export const vendorsAPI = {
   createProduct: async (productData: any) => {
     const response = await api.post('/vendors/me/products/create', productData)
     return response.data
+  },
+
+  assistProduct: async (payload: {
+    name: string
+    category: string
+    specifications?: Record<string, any>
+    description?: string
+  }) => {
+    const response = await api.post('/vendors/me/products/assist', payload, { timeout: 45000 })
+    return response.data as {
+      kind: 'goods' | 'software' | 'service'
+      kind_label: string
+      suggested_category: string | null
+      category_mismatch: boolean
+      description: string
+      note: string
+      image_rule: string
+    }
   },
 
   uploadProductImages: async (files: File[], productName: string, category: string) => {
@@ -382,6 +552,128 @@ export const vendorsAPI = {
   getMyProducts: async () => {
     const response = await api.get('/vendors/me/products')
     return response.data
+  },
+
+  uploadDocument: async (
+    file: File,
+    documentType: 'id_document' | 'address_bill' | 'company_certificate' | 'vat_certificate' | 'tax_clearance',
+  ) => {
+    const token = await getAccessToken()
+    if (!token) throw new Error('Please log in again to upload documents.')
+    const formData = new FormData()
+    formData.append('file', file)
+    const response = await api.post('/vendors/me/upload-document', formData, {
+      params: { document_type: documentType },
+      headers: { Authorization: `Bearer ${token}` },
+      timeout: 120000,
+    })
+    return response.data as { url: string; document_type: string; vendor?: any; message?: string }
+  },
+
+  submitForReview: async () => {
+    const response = await api.post('/vendors/me/submit')
+    return response.data
+  },
+
+  updateVatDetails: async (payload: { tin?: string; tax_clearance_expires_at?: string | null }) => {
+    const response = await api.put('/vendors/me/vat', payload)
+    return response.data
+  },
+
+  requestVatReview: async () => {
+    const response = await api.post('/vendors/me/vat/request')
+    return response.data
+  },
+}
+
+export const adminAPI = {
+  listVendors: async (status?: string) => {
+    const response = await api.get('/admin/vendors', { params: status ? { status } : undefined })
+    return response.data as any[]
+  },
+  reviewVendor: async (vendorId: number, action: 'approve' | 'reject' | 'revoke', notes?: string) => {
+    const response = await api.post(`/admin/vendors/${vendorId}/review`, { action, notes })
+    return response.data
+  },
+  getVendor: async (vendorId: number) => {
+    const response = await api.get(`/admin/vendors/${vendorId}`)
+    return response.data
+  },
+  assessVendorProduct: async (
+    vendorId: number,
+    listingId: number,
+    action: 'approve' | 'flag' | 'hide',
+    notes?: string,
+  ) => {
+    const response = await api.post(`/admin/vendors/${vendorId}/products/${listingId}/assess`, { action, notes })
+    return response.data
+  },
+  deleteVendorProduct: async (vendorId: number, listingId: number) => {
+    const response = await api.delete(`/admin/vendors/${vendorId}/products/${listingId}`)
+    return response.data
+  },
+  reviewVendorVat: async (vendorId: number, action: 'approve' | 'reject', notes?: string) => {
+    const response = await api.post(`/admin/vendors/${vendorId}/vat`, { action, notes })
+    return response.data
+  },
+  getVendorBooks: async (vendorId: number) => {
+    const response = await api.get(`/bisonbook/admin/vendors/${vendorId}`)
+    return response.data
+  },
+  adviseVendor: async (vendorId: number, message: string, vendorProductId?: number | null) => {
+    const response = await api.post(`/admin/vendors/${vendorId}/advice`, {
+      message,
+      vendor_product_id: vendorProductId || null,
+    })
+    return response.data
+  },
+}
+
+export const bisonbookAPI = {
+  get: async <T = any>(path: string, params?: Record<string, any>) => {
+    const response = await api.get(`/bisonbook${path}`, { params })
+    return response.data as T
+  },
+  post: async <T = any>(path: string, body?: any) => {
+    const response = await api.post(`/bisonbook${path}`, body ?? {})
+    return response.data as T
+  },
+  put: async <T = any>(path: string, body?: any) => {
+    const response = await api.put(`/bisonbook${path}`, body ?? {})
+    return response.data as T
+  },
+  patch: async <T = any>(path: string, body?: any) => {
+    const response = await api.patch(`/bisonbook${path}`, body ?? {})
+    return response.data as T
+  },
+  del: async <T = any>(path: string) => {
+    const response = await api.delete(`/bisonbook${path}`)
+    return response.data as T
+  },
+  upload: async <T = any>(path: string, form: FormData) => {
+    const token = await getAccessToken()
+    const response = await api.post(`/bisonbook${path}`, form, {
+      headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+      timeout: 180000,
+    })
+    return response.data as T
+  },
+  /** Fetch an authenticated file (PDF/CSV) and open or download it in the browser. */
+  open: async (path: string, params?: Record<string, any>, filename?: string) => {
+    const response = await api.get(`/bisonbook${path}`, { params, responseType: 'blob', timeout: 60000 })
+    const blob = response.data as Blob
+    const url = URL.createObjectURL(blob)
+    if (filename && !blob.type.includes('pdf')) {
+      const link = document.createElement('a')
+      link.href = url
+      link.download = filename
+      document.body.appendChild(link)
+      link.click()
+      link.remove()
+    } else {
+      window.open(url, '_blank', 'noopener')
+    }
+    setTimeout(() => URL.revokeObjectURL(url), 60000)
   },
 }
 

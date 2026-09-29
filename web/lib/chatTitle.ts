@@ -38,6 +38,8 @@ const FILLERS = [
   /^(what(?:'s| is| are)|whats)\s+/i,
   /^(how much(?: is| are)?|how many)\s+/i,
   /^(tell me about|recommend|suggest)\s+/i,
+  /^(yes|yeah|yep|ok|okay)[,.\s]+/i,
+  /^(please\s+)?(generate|create|make)\s+(a |an |me )?/i,
 ]
 
 const BRANDS = [
@@ -92,8 +94,25 @@ const TOPIC_RULES: Array<[RegExp, string]> = [
   [/\b(?:phones?|smartphones?|mobiles?)\b/i, 'Phones'],
   [/\b(?:tablets?|ipads?)\b/i, 'Tablets'],
   [/\b(?:monitors?|screens?)\b/i, 'Monitors'],
+  [/\b(?:software|saas|crm|erp|apps?)\b/i, 'Software'],
+  [/\b(?:website|web development|app development|services?)\b/i, 'Services'],
 ]
 
+const WEAK_TITLES = new Set(['new chat', 'newchat', 'chat', 'greeting', 'untitled'])
+const TITLE_LOCK_KEY = 'procurex_title_locked'
+
+const GENERIC_LABELS = new Set([
+  'quotation',
+  'vendors',
+  'product availability',
+  'pricing',
+  'laptops',
+  'phones',
+  'tablets',
+  'monitors',
+  'software',
+  'services',
+])
 const SMALL_WORDS = new Set(['a', 'an', 'the', 'and', 'or', 'for', 'of', 'in', 'on', 'to', 'with', 'under'])
 const ACRONYMS = new Set(['hp', 'ibm', 'ram', 'ssd', 'hdd', 'it', 'rfq', 'gpu', 'cpu', 'usb'])
 const STOP_WORDS = new Set(['a', 'an', 'the', 'me', 'my', 'some', 'any', 'please', 'just', 'this', 'that', 'those', 'these'])
@@ -112,6 +131,91 @@ export function isSmalltalk(text: string) {
   if (SMALLTALK.has(cleaned)) return true
   const words = cleaned.split(' ')
   return words.length <= 4 && SMALLTALK.has(words[0])
+}
+
+export function isWeakTitle(title?: string) {
+  const cleaned = plain(title || '')
+  if (!cleaned) return true
+  if (WEAK_TITLES.has(cleaned) || cleaned.startsWith('chat ')) return true
+  if (/^greeting(?:\s+\d+)?$/.test(cleaned)) return true
+  if (isSmalltalk(title || '')) return true
+  return false
+}
+
+function readTitleLocks(): Record<string, boolean> {
+  if (typeof window === 'undefined') return {}
+  try {
+    const raw = localStorage.getItem(TITLE_LOCK_KEY)
+    const parsed = raw ? JSON.parse(raw) : {}
+    return parsed && typeof parsed === 'object' ? parsed : {}
+  } catch {
+    return {}
+  }
+}
+
+export function isChatTitleLocked(sessionId: string | number | undefined) {
+  if (sessionId == null) return false
+  return Boolean(readTitleLocks()[String(sessionId)])
+}
+
+export function lockChatTitle(sessionId: string | number | undefined) {
+  if (sessionId == null || typeof window === 'undefined') return
+  try {
+    const locks = readTitleLocks()
+    locks[String(sessionId)] = true
+    localStorage.setItem(TITLE_LOCK_KEY, JSON.stringify(locks))
+  } catch {
+    // ignore
+  }
+}
+
+export function uniqueChatTitle(base: string, existing: string[] = []) {
+  const wanted = (base || 'New chat').trim() || 'New chat'
+  const taken = new Set(
+    existing
+      .map((item) => String(item || '').trim().toLowerCase())
+      .filter(Boolean)
+  )
+  if (!taken.has(wanted.toLowerCase())) return wanted.slice(0, 60)
+  for (let n = 2; n < 100; n++) {
+    const candidate = `${wanted} ${n}`.slice(0, 60)
+    if (!taken.has(candidate.toLowerCase())) return candidate
+  }
+  return `${wanted} ${Date.now().toString().slice(-3)}`.slice(0, 60)
+}
+
+export function uniquifySessionTitles<T extends { id?: string | number; title?: string; created_at?: string }>(
+  sessions: T[]
+): T[] {
+  if (!sessions.length) return sessions
+  const chronological = [...sessions].sort((a, b) => {
+    const ta = new Date(a.created_at || 0).getTime()
+    const tb = new Date(b.created_at || 0).getTime()
+    if (ta !== tb) return ta - tb
+    return String(a.id ?? '').localeCompare(String(b.id ?? ''))
+  })
+  const used: string[] = []
+  const nextById = new Map<string, string>()
+  for (const session of chronological) {
+    const id = String(session.id ?? '')
+    const base = (session.title || 'New chat').trim() || 'New chat'
+    if (isChatTitleLocked(session.id)) {
+      used.push(base)
+      nextById.set(id, base)
+      continue
+    }
+    const next = uniqueChatTitle(base, used)
+    used.push(next)
+    nextById.set(id, next)
+  }
+  let changed = false
+  const next = sessions.map((session) => {
+    const title = nextById.get(String(session.id ?? ''))
+    if (!title || title === session.title) return session
+    changed = true
+    return { ...session, title }
+  })
+  return changed ? next : sessions
 }
 
 function prettyWord(word: string, index: number) {
@@ -150,7 +254,7 @@ function stripFillers(text: string) {
 function compactPhrase(text: string) {
   const words: string[] = []
   for (const raw of text.split(' ')) {
-    const token = raw.replace(/[^\w$%-]/g, '')
+    const token = raw.replace(/[^\w$%.-]/g, '')
     if (!token) continue
     if (STOP_WORDS.has(token.toLowerCase()) && words.length > 0) continue
     words.push(token)
@@ -161,6 +265,11 @@ function compactPhrase(text: string) {
     phrase = phrase.slice(0, 42).replace(/\s+\S*$/, '')
   }
   return phrase
+}
+
+function namedProductTitle(text: string) {
+  const match = text.match(/\b([a-z0-9][\w-]*\.(?:ng|com|io|app|ai|co|net|org|dev))\b/i)
+  return match ? match[1] : null
 }
 
 function brandProductTitle(text: string) {
@@ -180,35 +289,54 @@ function brandProductTitle(text: string) {
   return titleCase(parts.join(' '))
 }
 
-export function naturalChatTitle(text: string, currentTitle?: string) {
+export function naturalChatTitle(
+  text: string,
+  currentTitle?: string,
+  options?: { existingTitles?: string[]; locked?: boolean }
+) {
   const current = (currentTitle || '').trim()
-  const currentKey = current.toLowerCase()
-  const locked =
-    current &&
-    currentKey !== 'new chat' &&
-    currentKey !== 'newchat' &&
-    !isSmalltalk(current) &&
-    current.length <= 42 &&
-    currentKey !== normalize(text).slice(0, current.length).toLowerCase()
+  const existing = options?.existingTitles || []
+  if (options?.locked && current && !isWeakTitle(current)) {
+    return uniqueChatTitle(current, existing)
+  }
 
-  if (locked) return current
-  if (isSmalltalk(text)) return current && currentKey !== 'new chat' ? current : null
+  if (isSmalltalk(text)) {
+    if (current && !isWeakTitle(current)) return uniqueChatTitle(current, existing)
+    return uniqueChatTitle('Greeting', existing)
+  }
 
   const stripped = stripFillers(text)
+  const named = namedProductTitle(stripped || text)
   const branded = brandProductTitle(stripped || text)
-  if (branded) return branded
-
-  const compact = compactPhrase(stripped || text).replace(/^(a|an)\s+/i, '').trim()
-  if (compact && !isSmalltalk(compact) && compact.split(' ').length >= 2) {
-    return titleCase(compact)
+  let generated = named || branded || ''
+  if (!generated) {
+    const compact = compactPhrase(stripped || text).replace(/^(a|an)\s+/i, '').trim()
+    if (compact && !isSmalltalk(compact) && compact.split(' ').length >= 2) {
+      generated = titleCase(compact)
+    } else {
+      for (const [pattern, label] of TOPIC_RULES) {
+        if (pattern.test(text)) {
+          generated = label
+          break
+        }
+      }
+      if (!generated && compact && !isSmalltalk(compact) && compact.length >= 3) {
+        generated = titleCase(compact)
+      }
+    }
   }
 
-  for (const [pattern, label] of TOPIC_RULES) {
-    if (pattern.test(text)) return label
+  if (!generated) {
+    if (current) return uniqueChatTitle(current, existing)
+    return uniqueChatTitle('Greeting', existing)
   }
 
-  if (compact && !isSmalltalk(compact) && compact.length >= 3) {
-    return titleCase(compact)
+  const currentKey = current.toLowerCase()
+  const genericCurrent = GENERIC_LABELS.has(currentKey)
+  const genericNew = GENERIC_LABELS.has(generated.toLowerCase())
+  if (current && !isWeakTitle(current) && !genericCurrent && genericNew) {
+    return uniqueChatTitle(current, existing)
   }
-  return null
+
+  return uniqueChatTitle(generated, existing)
 }

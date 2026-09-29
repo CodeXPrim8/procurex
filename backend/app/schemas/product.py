@@ -26,7 +26,7 @@ def coalesce_image_urls(image_url: Optional[str], image_urls: Optional[List[str]
 
 class ProductCreate(BaseModel):
     name: str
-    sku: str
+    sku: Optional[str] = None
     category: str
     description: Optional[str] = None
     specifications: Optional[Dict[str, Any]] = None
@@ -47,6 +47,19 @@ class ProductResponse(BaseModel):
     image_urls: List[str] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime
+    price: Optional[int] = None
+    price_mode: str = "fixed"
+    contact_for_price: bool = False
+    delivery_mode: Optional[str] = None
+    availability_scope: Optional[str] = None
+    vendor_country: Optional[str] = None
+    stock: int = 0
+    vendor_id: Optional[int] = None
+    vendor_product_id: Optional[int] = None
+    vendor_name: Optional[str] = None
+    vendor_phone: Optional[str] = None
+    vendor_domain: Optional[str] = None
+    available_vendors: int = 0
 
     class Config:
         from_attributes = True
@@ -79,12 +92,17 @@ class ProductSearch(BaseModel):
     max_price: Optional[int] = None
     in_stock_only: bool = False
     brand: Optional[str] = None
+    buyer_country: Optional[str] = None  # ISO alpha-2; None shows every region
+    spec_hints: Optional[Dict[str, str]] = None
+    buyer_bias: Optional[Dict[str, Any]] = None
 
 
 class VendorProductCreate(BaseModel):
     product_id: int
     stock_quantity: int = 0
-    price: int  # Price in cents
+    price: int = 0  # Price in cents; ignored when price_mode is "contact"
+    price_mode: str = "fixed"
+    delivery_mode: Optional[str] = None  # services only: "remote" | "onsite"
 
 
 class VendorProductResponse(BaseModel):
@@ -93,9 +111,20 @@ class VendorProductResponse(BaseModel):
     product_id: int
     stock_quantity: int
     price: int
+    price_mode: str = "fixed"
+    delivery_mode: Optional[str] = None
     last_verified: datetime
     is_active: bool
+    admin_assessment: str = "pending"
+    admin_assessment_notes: Optional[str] = None
+    admin_assessed_at: Optional[datetime] = None
+    admin_assessed_by: Optional[str] = None
     product: Optional[ProductResponse] = None
 
     class Config:
         from_attributes = True
+
+    @field_validator("price_mode", mode="before")
+    @classmethod
+    def default_price_mode(cls, value):
+        return value or "fixed"
