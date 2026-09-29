@@ -21,8 +21,16 @@ export function getActiveBusinessId() {
   return readId(BUSINESS_KEY)
 }
 
-export function setActiveBusinessId(id: number | null) {
+export function setActiveBusinessId(
+  id: number | null,
+  options?: { skipCloud?: boolean }
+) {
   writeId(BUSINESS_KEY, id)
+  if (!options?.skipCloud) {
+    void import('./cloudWorkspace')
+      .then(({ patchWorkspace }) => patchWorkspace({ active_business_id: id }))
+      .catch(() => {})
+  }
 }
 
 export function getActiveClientId() {

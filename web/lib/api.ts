@@ -366,27 +366,64 @@ export const productAPI = {
   },
 }
 
+async function fileToDataUrl(file: File, maxChars = 350_000) {
+  const dataUrl = await new Promise<string>((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(String(reader.result || ''))
+    reader.onerror = () => reject(reader.error)
+    reader.readAsDataURL(file)
+  })
+  return dataUrl.length > maxChars ? '' : dataUrl
+}
+
+async function cloudWorkspace() {
+  return import('./cloudWorkspace')
+}
+
 // Quotation API
 export const quotationAPI = {
   create: async (quotationData: any) => {
     const response = await api.post('/quotations', quotationData)
+    void cloudWorkspace().then(({ upsertQuotations }) => upsertQuotations([response.data]))
     return response.data
   },
 
   getQuotations: async (businessId?: number) => {
-    const response = await api.get('/quotations', {
-      params: businessId ? { business_id: businessId } : undefined,
-    })
-    return response.data
+    try {
+      const response = await api.get('/quotations', {
+        params: businessId ? { business_id: businessId } : undefined,
+      })
+      const rows = Array.isArray(response.data) ? response.data : []
+      const { upsertQuotations, replaceQuotations } = await cloudWorkspace()
+      if (businessId) void upsertQuotations(rows)
+      else void replaceQuotations(rows)
+      return rows
+    } catch (error) {
+      const { loadWorkspace, quotationsForBusiness } = await cloudWorkspace()
+      const rows = quotationsForBusiness((await loadWorkspace(true)).quotations || [], businessId)
+      if (rows.length) return rows
+      throw error
+    }
   },
 
   getQuotation: async (quotationId: number) => {
-    const response = await api.get(`/quotations/${quotationId}`)
-    return response.data
+    try {
+      const response = await api.get(`/quotations/${quotationId}`)
+      void cloudWorkspace().then(({ upsertQuotations }) => upsertQuotations([response.data]))
+      return response.data
+    } catch (error) {
+      const { loadWorkspace } = await cloudWorkspace()
+      const row = ((await loadWorkspace(true)).quotations || []).find(
+        (item) => Number(item?.id) === Number(quotationId)
+      )
+      if (row) return row
+      throw error
+    }
   },
 
   update: async (quotationId: number, payload: any) => {
     const response = await api.patch(`/quotations/${quotationId}`, payload)
+    void cloudWorkspace().then(({ upsertQuotations }) => upsertQuotations([response.data]))
     return response.data
   },
 
@@ -405,57 +442,93 @@ export const quotationAPI = {
 
   convert: async (quotationId: number, kind: 'invoice' | 'receipt') => {
     const response = await api.post(`/quotations/${quotationId}/convert`, { kind })
+    void cloudWorkspace().then(({ upsertQuotations }) => upsertQuotations([response.data]))
     return response.data
   },
 }
 
+async function rememberBusiness(row: any) {
+  if (!row) return row
+  void cloudWorkspace().then(({ upsertBusinesses }) => upsertBusinesses([row]))
+  return row
+}
+
 export const businessAPI = {
   list: async () => {
-    const response = await api.get('/businesses')
-    return response.data
+    try {
+      const response = await api.get('/businesses')
+      const rows = Array.isArray(response.data) ? response.data : []
+      void cloudWorkspace().then(({ replaceBusinesses }) => replaceBusinesses(rows))
+      return rows
+    } catch (error) {
+      const { loadWorkspace } = await cloudWorkspace()
+      const rows = (await loadWorkspace(true)).businesses || []
+      if (rows.length) return rows
+      throw error
+    }
   },
   get: async (id: number) => {
-    const response = await api.get(`/businesses/${id}`)
-    return response.data
+    try {
+      const response = await api.get(`/businesses/${id}`)
+      return rememberBusiness(response.data)
+    } catch (error) {
+      const { loadWorkspace } = await cloudWorkspace()
+      const row = ((await loadWorkspace(true)).businesses || []).find(
+        (item) => Number(item?.id) === Number(id)
+      )
+      if (row) return row
+      throw error
+    }
   },
   create: async (payload: any) => {
     const response = await api.post('/businesses', payload)
-    return response.data
+    return rememberBusiness(response.data)
   },
   update: async (id: number, payload: any) => {
     const response = await api.patch(`/businesses/${id}`, payload)
-    return response.data
+    return rememberBusiness(response.data)
   },
   remove: async (id: number) => {
     await api.delete(`/businesses/${id}`)
+    void cloudWorkspace().then(({ removeBusiness }) => removeBusiness(id))
   },
   uploadBrand: async (id: number, kind: 'logo' | 'letterhead', file: File) => {
     const form = new FormData()
     form.append('file', file)
     const response = await api.post(`/businesses/${id}/branding/${kind}`, form)
-    return response.data
+    const overlay = await fileToDataUrl(file)
+    const next = overlay
+      ? { ...response.data, [kind === 'logo' ? 'logo_url' : 'letterhead_url']: overlay }
+      : response.data
+    return rememberBusiness(next)
   },
   createClient: async (id: number, payload: any) => {
     const response = await api.post(`/businesses/${id}/clients`, payload)
+    void api.get(`/businesses/${id}`).then((full) => rememberBusiness(full.data)).catch(() => null)
     return response.data
   },
   updateClient: async (id: number, clientId: number, payload: any) => {
     const response = await api.patch(`/businesses/${id}/clients/${clientId}`, payload)
+    void api.get(`/businesses/${id}`).then((full) => rememberBusiness(full.data)).catch(() => null)
     return response.data
   },
   removeClient: async (id: number, clientId: number) => {
     await api.delete(`/businesses/${id}/clients/${clientId}`)
+    void api.get(`/businesses/${id}`).then((full) => rememberBusiness(full.data)).catch(() => null)
   },
   createRequest: async (id: number, payload: any) => {
     const response = await api.post(`/businesses/${id}/requests`, payload)
+    void api.get(`/businesses/${id}`).then((full) => rememberBusiness(full.data)).catch(() => null)
     return response.data
   },
   updateRequest: async (id: number, requestId: number, payload: any) => {
     const response = await api.patch(`/businesses/${id}/requests/${requestId}`, payload)
+    void api.get(`/businesses/${id}`).then((full) => rememberBusiness(full.data)).catch(() => null)
     return response.data
   },
   removeRequest: async (id: number, requestId: number) => {
     await api.delete(`/businesses/${id}/requests/${requestId}`)
+    void api.get(`/businesses/${id}`).then((full) => rememberBusiness(full.data)).catch(() => null)
   },
 }
 

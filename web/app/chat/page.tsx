@@ -49,6 +49,7 @@ import {
   getCloudSession,
   deleteCloudSession,
   importApiSessionToCloud,
+  importLocalChatToCloud,
   isCloudSessionId,
   listCloudSessions,
   mergeChatHistory,
@@ -56,8 +57,9 @@ import {
   subscribeCloudChats,
   updateCloudSession,
 } from '@/lib/cloudChats'
+import { extraFromApiMessage } from '@/lib/cloudMessage'
+import { loadWorkspace, readLastChatId, rememberLastChatId, upsertQuotations } from '@/lib/cloudWorkspace'
 
-const LAST_CHAT_KEY = 'procurex_last_chat_id'
 const GUEST_CHATS_KEY = 'temp_chat_sessions'
 
 function accountChatsKey(userId: string) {
@@ -307,25 +309,7 @@ function applyCloudSession(current: any, incoming: any) {
 }
 
 function rememberChat(id: number | string | undefined) {
-  if (id == null || id === '' || typeof window === 'undefined') return
-  try {
-    localStorage.setItem(LAST_CHAT_KEY, String(id))
-  } catch {
-    // ignore storage errors
-  }
-}
-
-function readLastChatId(): string | number | null {
-  if (typeof window === 'undefined') return null
-  try {
-    const raw = localStorage.getItem(LAST_CHAT_KEY)
-    if (!raw) return null
-    if (isCloudSessionId(raw)) return raw
-    const parsed = Number(raw)
-    return Number.isFinite(parsed) ? parsed : raw
-  } catch {
-    return null
-  }
+  rememberLastChatId(id)
 }
 
 function mergeSessionLists(serverList: any[], localList: any[]) {
@@ -581,11 +565,15 @@ export default function ChatPage() {
     session: any,
     role: 'user' | 'assistant' | 'system',
     content: string,
-    title?: string
+    title?: string,
+    extra?: { quotation?: any; product_results?: any[] } | null
   ) => {
     if (!isAuthenticated || !isCloudSessionId(session?.id) || !content) return
     try {
-      await saveCloudMessage(session.id, role, content, title)
+      await saveCloudMessage(session.id, role, content, title, extra)
+      if (extra?.quotation?.id || extra?.quotation?.quotation_number) {
+        void upsertQuotations([extra.quotation])
+      }
     } catch (error) {
       console.error('Failed to sync chat:', error)
     }
@@ -718,7 +706,29 @@ export default function ChatPage() {
           if (list.length === 0) {
             list = [await createCloudSession('New chat')]
           }
-          const lastId = readLastChatId()
+          try {
+            const guestChats = readStoredSessions(GUEST_CHATS_KEY).filter((item) => !isBlankChat(item))
+            for (const guest of guestChats) {
+              if (!stillActive()) return
+              await importLocalChatToCloud({
+                ...guest,
+                messages: (guest.messages || []).map((message: any) => ({
+                  role: message.role,
+                  content: message.content,
+                  quotation: extraFromApiMessage(message).quotation,
+                  product_results: extraFromApiMessage(message).product_results,
+                })),
+              })
+            }
+            if (guestChats.length) {
+              writeStoredSessions(GUEST_CHATS_KEY, [])
+              list = await listCloudSessions()
+              if (!list.length) list = [await createCloudSession('New chat')]
+            }
+          } catch {
+            // Guest chats stay on this device if cloud import fails.
+          }
+          const lastId = readLastChatId() || (await loadWorkspace()).last_chat_id
           const preferred =
             list.find((item) => sameChatId(item.id, lastId)) ||
             list.find((item) => sameChatId(item.id, currentSessionRef.current?.id)) ||
@@ -756,6 +766,8 @@ export default function ChatPage() {
                     messages: (full.messages || []).map((message: any) => ({
                       role: message.role,
                       content: message.content,
+                      quotation: extraFromApiMessage(message).quotation,
+                      product_results: extraFromApiMessage(message).product_results,
                     })),
                   })
                 } catch {
@@ -791,7 +803,7 @@ export default function ChatPage() {
             }
           }
         } else {
-          const lastId = readLastChatId()
+          const lastId = readLastChatId() || (await loadWorkspace()).last_chat_id
           const preferred =
             list.find((item: any) => sameChatId(item.id, lastId)) || list[0]
           if (preferred) {
@@ -1626,7 +1638,10 @@ export default function ChatPage() {
             current,
             'assistant',
             liveAssistantRef.current,
-            isChatTitleLocked(current.id) ? current.title : data.title || current.title
+            isChatTitleLocked(current.id) ? current.title : data.title || current.title,
+            data.quotation || data.product_results
+              ? { quotation: data.quotation, product_results: data.product_results }
+              : undefined
           )
         }
         if (liveAssistantRef.current && liveAssistantRef.current !== '...') {
@@ -2013,7 +2028,10 @@ export default function ChatPage() {
         setIsLoading(false)
         sendLockRef.current = false
         speakReplyFn.current(assistantResponse)
-        void persistAccountMessage(sendChat, 'assistant', assistantResponse, title)
+        void persistAccountMessage(sendChat, 'assistant', assistantResponse, title, {
+          quotation: extra?.quotation,
+          product_results: extra?.product_results,
+        })
         if (wsId && !extra?.saved) {
           try {
             await chatAPI.createMessage(wsId, assistantResponse, 'assistant')

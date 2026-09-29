@@ -5,6 +5,7 @@ import ReactMarkdown from 'react-markdown'
 import { User, Volume2, Copy, Share2, Check, ArrowUpRight } from 'lucide-react'
 import Logo from '@/components/Logo'
 import { ChatQuoteCard } from '@/components/QuotationCard'
+import { decodeCloudContent } from '@/lib/cloudMessage'
 
 interface ChatMessageProps {
  message: {
@@ -21,14 +22,18 @@ interface ChatMessageProps {
 
 function quotationFromMessage(message: ChatMessageProps['message']) {
  if (message?.quotation?.quotation_number) return message.quotation
+ const decoded = decodeCloudContent(message?.content)
+ if (decoded.quotation?.quotation_number) return decoded.quotation
  const raw = message?.metadata
- if (!raw) return null
- try {
-  const payload = typeof raw === 'string' ? JSON.parse(raw) : raw
-  return payload?.quotation || null
- } catch {
-  return null
+ if (raw) {
+  try {
+   const payload = typeof raw === 'string' ? JSON.parse(raw) : raw
+   if (payload?.quotation) return payload.quotation
+  } catch {
+   return decoded.quotation || null
+  }
  }
+ return decoded.quotation || null
 }
 
 const markdownComponents = {
@@ -104,15 +109,17 @@ export default function ChatMessage({
  onFollowUp,
  followUpDisabled = false,
 }: ChatMessageProps) {
+ const decoded = decodeCloudContent(message.content)
+ const sourceText = decoded.content
  const isUser = message.role === 'user'
  const [copied, setCopied] = useState(false)
- const followUps = !isUser ? extractFollowUps(message.content) : { body: message.content, steps: [] }
- const displayContent = isUser ? message.content : followUps.body
- const quotation = !isUser ? quotationFromMessage(message) : null
+ const followUps = !isUser ? extractFollowUps(sourceText) : { body: sourceText, steps: [] }
+ const displayContent = isUser ? sourceText : followUps.body
+ const quotation = !isUser ? quotationFromMessage({ ...message, content: sourceText, quotation: message.quotation || decoded.quotation }) : null
 
  const copyText = async () => {
  try {
- await navigator.clipboard.writeText(message.content)
+ await navigator.clipboard.writeText(sourceText)
  setCopied(true)
  setTimeout(() => setCopied(false), 1600)
  } catch {
@@ -123,7 +130,7 @@ export default function ChatMessage({
  const shareText = async () => {
  try {
  if (navigator.share) {
- await navigator.share({ text: message.content })
+ await navigator.share({ text: sourceText })
  return
  }
  await copyText()
@@ -177,7 +184,7 @@ export default function ChatMessage({
  ))}
  </div>
  )}
- {!isUser && message.content && (
+ {!isUser && sourceText && (
  <div
  className={`mt-1.5 flex items-center gap-1 text-[#8e8e8e] transition-opacity ${
  showActions ? 'opacity-100' : 'opacity-0 md:group-hover:opacity-100'
@@ -195,7 +202,7 @@ export default function ChatMessage({
  {onSpeak && (
  <button
  type="button"
- onClick={() => onSpeak(message.content)}
+ onClick={() => onSpeak(sourceText)}
  className="p-1.5 rounded-lg hover:text-white hover:bg-white/5"
  title="Listen"
  aria-label="Listen"

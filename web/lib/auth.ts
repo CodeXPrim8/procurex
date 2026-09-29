@@ -134,6 +134,9 @@ export function useAuth() {
       if (mapped && mounted) {
         hydrateTtsVoiceFromAccount(mapped)
         setUser(mapped)
+        void import('./cloudWorkspace').then(({ hydrateAccountWorkspace }) =>
+          hydrateAccountWorkspace().catch(() => null)
+        )
       }
     }
 
