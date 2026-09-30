@@ -447,10 +447,73 @@ export const quotationAPI = {
   },
 }
 
-async function rememberBusiness(row: any) {
+async function rememberBusiness(row: any, wait = false) {
   if (!row) return row
-  void cloudWorkspace().then(({ upsertBusinesses }) => upsertBusinesses([row]))
+  const job = cloudWorkspace().then(({ upsertBusinesses }) => upsertBusinesses([row]))
+  if (wait) await job.catch(() => null)
+  else void job
   return row
+}
+
+async function readCloudBusinesses() {
+  const { loadWorkspace } = await cloudWorkspace()
+  return (await loadWorkspace(true)).businesses || []
+}
+
+async function cloudBusinessName() {
+  try {
+    const { data } = await supabase.auth.getUser()
+    const meta = data.user?.user_metadata || {}
+    const named = String(meta.full_name || '').trim()
+    if (named) return named
+    return String(data.user?.email || '').split('@')[0] || 'My business'
+  } catch {
+    return 'My business'
+  }
+}
+
+function asBusiness(row: any, patch: Record<string, any> = {}) {
+  const now = new Date().toISOString()
+  const clients = patch.clients ?? (Array.isArray(row?.clients) ? row.clients : [])
+  const requests = patch.requests ?? (Array.isArray(row?.requests) ? row.requests : [])
+  return {
+    id: patch.id ?? row?.id ?? Date.now(),
+    user_id: row?.user_id ?? 0,
+    name: String(patch.name ?? row?.name ?? 'My business').trim() || 'My business',
+    legal_name: patch.legal_name !== undefined ? patch.legal_name : row?.legal_name ?? null,
+    email: patch.email !== undefined ? patch.email : row?.email ?? null,
+    phone: patch.phone !== undefined ? patch.phone : row?.phone ?? null,
+    address: patch.address !== undefined ? patch.address : row?.address ?? null,
+    logo_url: patch.logo_url !== undefined ? patch.logo_url : row?.logo_url ?? null,
+    letterhead_url: patch.letterhead_url !== undefined ? patch.letterhead_url : row?.letterhead_url ?? null,
+    template_kind: patch.template_kind || row?.template_kind || 'classic',
+    vat_percent: patch.vat_percent !== undefined ? patch.vat_percent : row?.vat_percent ?? 7.5,
+    footer_note: patch.footer_note !== undefined ? patch.footer_note : row?.footer_note ?? null,
+    is_default: patch.is_default !== undefined ? Boolean(patch.is_default) : Boolean(row?.is_default),
+    created_at: row?.created_at || now,
+    updated_at: now,
+    clients,
+    requests,
+  }
+}
+
+async function cloudBusinessById(id: number) {
+  return (await readCloudBusinesses()).find((item) => Number(item?.id) === Number(id)) || null
+}
+
+async function ensureCloudBusinesses(rows: any[]) {
+  const list = Array.isArray(rows) ? rows.filter(Boolean) : []
+  if (list.length) return list
+  const created = asBusiness(null, {
+    name: await cloudBusinessName(),
+    is_default: true,
+  })
+  await rememberBusiness(created, true)
+  return [created]
+}
+
+async function saveCloudBusiness(row: any) {
+  return rememberBusiness(asBusiness(row), true)
 }
 
 export const businessAPI = {
@@ -458,13 +521,20 @@ export const businessAPI = {
     try {
       const response = await api.get('/businesses')
       const rows = Array.isArray(response.data) ? response.data : []
-      void cloudWorkspace().then(({ replaceBusinesses }) => replaceBusinesses(rows))
-      return rows
-    } catch (error) {
-      const { loadWorkspace } = await cloudWorkspace()
-      const rows = (await loadWorkspace(true)).businesses || []
-      if (rows.length) return rows
-      throw error
+      const cloud = await readCloudBusinesses().catch(() => [])
+      const extras = (cloud || []).filter(
+        (item) => !rows.some((row: any) => String(row?.id) === String(item?.id))
+      )
+      const merged = [...rows, ...extras]
+      void cloudWorkspace().then(({ upsertBusinesses }) => upsertBusinesses(merged))
+      if (merged.length) return merged
+      return ensureCloudBusinesses([])
+    } catch {
+      try {
+        return await ensureCloudBusinesses(await readCloudBusinesses())
+      } catch {
+        return ensureCloudBusinesses([])
+      }
     }
   },
   get: async (id: number) => {
@@ -472,63 +542,157 @@ export const businessAPI = {
       const response = await api.get(`/businesses/${id}`)
       return rememberBusiness(response.data)
     } catch (error) {
-      const { loadWorkspace } = await cloudWorkspace()
-      const row = ((await loadWorkspace(true)).businesses || []).find(
-        (item) => Number(item?.id) === Number(id)
-      )
+      const row = await cloudBusinessById(id)
       if (row) return row
       throw error
     }
   },
   create: async (payload: any) => {
-    const response = await api.post('/businesses', payload)
-    return rememberBusiness(response.data)
+    try {
+      const response = await api.post('/businesses', payload)
+      return rememberBusiness(response.data)
+    } catch {
+      const existing = await readCloudBusinesses().catch(() => [])
+      const created = asBusiness(null, {
+        ...payload,
+        is_default: payload?.is_default || existing.length === 0,
+      })
+      return saveCloudBusiness(created)
+    }
   },
   update: async (id: number, payload: any) => {
-    const response = await api.patch(`/businesses/${id}`, payload)
-    return rememberBusiness(response.data)
+    try {
+      const response = await api.patch(`/businesses/${id}`, payload)
+      return rememberBusiness(response.data)
+    } catch (error) {
+      const row = await cloudBusinessById(id)
+      if (!row) throw error
+      return saveCloudBusiness(asBusiness(row, payload))
+    }
   },
   remove: async (id: number) => {
-    await api.delete(`/businesses/${id}`)
+    try {
+      await api.delete(`/businesses/${id}`)
+    } catch {
+      // Keep the account copy in sync even when the laptop API is offline.
+    }
     void cloudWorkspace().then(({ removeBusiness }) => removeBusiness(id))
   },
   uploadBrand: async (id: number, kind: 'logo' | 'letterhead', file: File) => {
-    const form = new FormData()
-    form.append('file', file)
-    const response = await api.post(`/businesses/${id}/branding/${kind}`, form)
     const overlay = await fileToDataUrl(file)
-    const next = overlay
-      ? { ...response.data, [kind === 'logo' ? 'logo_url' : 'letterhead_url']: overlay }
-      : response.data
-    return rememberBusiness(next)
+    try {
+      const form = new FormData()
+      form.append('file', file)
+      const response = await api.post(`/businesses/${id}/branding/${kind}`, form)
+      const next = overlay
+        ? { ...response.data, [kind === 'logo' ? 'logo_url' : 'letterhead_url']: overlay }
+        : response.data
+      return rememberBusiness(next)
+    } catch (error) {
+      const row = await cloudBusinessById(id)
+      if (!row || !overlay) throw error
+      return saveCloudBusiness(
+        asBusiness(row, { [kind === 'logo' ? 'logo_url' : 'letterhead_url']: overlay })
+      )
+    }
   },
   createClient: async (id: number, payload: any) => {
-    const response = await api.post(`/businesses/${id}/clients`, payload)
-    void api.get(`/businesses/${id}`).then((full) => rememberBusiness(full.data)).catch(() => null)
-    return response.data
+    try {
+      const response = await api.post(`/businesses/${id}/clients`, payload)
+      void api.get(`/businesses/${id}`).then((full) => rememberBusiness(full.data)).catch(() => null)
+      return response.data
+    } catch (error) {
+      const row = await cloudBusinessById(id)
+      if (!row) throw error
+      const client = {
+        id: Date.now(),
+        business_id: id,
+        created_at: new Date().toISOString(),
+        ...payload,
+      }
+      await saveCloudBusiness(asBusiness(row, { clients: [...(row.clients || []), client] }))
+      return client
+    }
   },
   updateClient: async (id: number, clientId: number, payload: any) => {
-    const response = await api.patch(`/businesses/${id}/clients/${clientId}`, payload)
-    void api.get(`/businesses/${id}`).then((full) => rememberBusiness(full.data)).catch(() => null)
-    return response.data
+    try {
+      const response = await api.patch(`/businesses/${id}/clients/${clientId}`, payload)
+      void api.get(`/businesses/${id}`).then((full) => rememberBusiness(full.data)).catch(() => null)
+      return response.data
+    } catch (error) {
+      const row = await cloudBusinessById(id)
+      if (!row) throw error
+      const clients = (row.clients || []).map((item: any) =>
+        Number(item.id) === Number(clientId) ? { ...item, ...payload } : item
+      )
+      await saveCloudBusiness(asBusiness(row, { clients }))
+      return clients.find((item: any) => Number(item.id) === Number(clientId))
+    }
   },
   removeClient: async (id: number, clientId: number) => {
-    await api.delete(`/businesses/${id}/clients/${clientId}`)
-    void api.get(`/businesses/${id}`).then((full) => rememberBusiness(full.data)).catch(() => null)
+    try {
+      await api.delete(`/businesses/${id}/clients/${clientId}`)
+      void api.get(`/businesses/${id}`).then((full) => rememberBusiness(full.data)).catch(() => null)
+    } catch {
+      const row = await cloudBusinessById(id)
+      if (!row) return
+      await saveCloudBusiness(
+        asBusiness(row, {
+          clients: (row.clients || []).filter((item: any) => Number(item.id) !== Number(clientId)),
+        })
+      )
+    }
   },
   createRequest: async (id: number, payload: any) => {
-    const response = await api.post(`/businesses/${id}/requests`, payload)
-    void api.get(`/businesses/${id}`).then((full) => rememberBusiness(full.data)).catch(() => null)
-    return response.data
+    try {
+      const response = await api.post(`/businesses/${id}/requests`, payload)
+      void api.get(`/businesses/${id}`).then((full) => rememberBusiness(full.data)).catch(() => null)
+      return response.data
+    } catch (error) {
+      const row = await cloudBusinessById(id)
+      if (!row) throw error
+      const request = {
+        id: Date.now(),
+        business_id: id,
+        status: payload?.status || 'open',
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+        ...payload,
+      }
+      await saveCloudBusiness(asBusiness(row, { requests: [...(row.requests || []), request] }))
+      return request
+    }
   },
   updateRequest: async (id: number, requestId: number, payload: any) => {
-    const response = await api.patch(`/businesses/${id}/requests/${requestId}`, payload)
-    void api.get(`/businesses/${id}`).then((full) => rememberBusiness(full.data)).catch(() => null)
-    return response.data
+    try {
+      const response = await api.patch(`/businesses/${id}/requests/${requestId}`, payload)
+      void api.get(`/businesses/${id}`).then((full) => rememberBusiness(full.data)).catch(() => null)
+      return response.data
+    } catch (error) {
+      const row = await cloudBusinessById(id)
+      if (!row) throw error
+      const requests = (row.requests || []).map((item: any) =>
+        Number(item.id) === Number(requestId)
+          ? { ...item, ...payload, updated_at: new Date().toISOString() }
+          : item
+      )
+      await saveCloudBusiness(asBusiness(row, { requests }))
+      return requests.find((item: any) => Number(item.id) === Number(requestId))
+    }
   },
   removeRequest: async (id: number, requestId: number) => {
-    await api.delete(`/businesses/${id}/requests/${requestId}`)
-    void api.get(`/businesses/${id}`).then((full) => rememberBusiness(full.data)).catch(() => null)
+    try {
+      await api.delete(`/businesses/${id}/requests/${requestId}`)
+      void api.get(`/businesses/${id}`).then((full) => rememberBusiness(full.data)).catch(() => null)
+    } catch {
+      const row = await cloudBusinessById(id)
+      if (!row) return
+      await saveCloudBusiness(
+        asBusiness(row, {
+          requests: (row.requests || []).filter((item: any) => Number(item.id) !== Number(requestId)),
+        })
+      )
+    }
   },
 }
 

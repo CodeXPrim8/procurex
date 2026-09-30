@@ -23,7 +23,7 @@ export default function BusinessesPage() {
 
   useEffect(() => {
     if (!isAuthenticated) return
-    void load().catch(() => showToast('Could not load businesses.', 'error'))
+    void load().catch(() => setRows([]))
   }, [isAuthenticated])
 
   if (!user) return null
